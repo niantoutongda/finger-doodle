@@ -1,0 +1,2461 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>手指涂鸦 · Finger Doodle</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #0a0a0a; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #fff; user-select: none;
+  }
+  #stage { position: relative; width: 100vw; height: 100vh; }
+  #video {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    object-fit: cover; transform: scaleX(-1); /* 镜像 */
+  }
+  canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #drawCanvas { pointer-events: none; }
+  #fxCanvas   { pointer-events: none; }
+
+  /* 顶部控制栏 */
+  #topbar {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(20,20,20,.55); backdrop-filter: blur(14px);
+    padding: 10px 18px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.12);
+    z-index: 10; font-size: 14px;
+  }
+  #status { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #status .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff5555; box-shadow: 0 0 8px #ff5555; }
+  #status.ready .dot { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+  #styleName { font-weight: 600; min-width: 70px; text-align: center; }
+  #colors { display: flex; gap: 6px; }
+  .swatch {
+    width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+    border: 2px solid rgba(255,255,255,.25); transition: transform .15s, border-color .15s;
+  }
+  .swatch:hover { transform: scale(1.15); }
+  .swatch.active { border-color: #fff; transform: scale(1.2); box-shadow: 0 0 10px currentColor; }
+  #fps { font-variant-numeric: tabular-nums; opacity: .8; font-size: 12px; }
+
+  /* 底部控制台 */
+  #console {
+    position: absolute; bottom: 14px; left: 14px;
+    background: rgba(0,0,0,.5); padding: 10px 14px; border-radius: 10px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 12px; line-height: 1.6;
+    max-width: 320px; z-index: 10; pointer-events: none;
+  }
+  #console .line { opacity: .9; }
+  #console .t { color: #6ee7b7; }
+  #console .k { color: #93c5fd; }
+
+  /* 提示 */
+  #hint {
+    position: absolute; top: 70px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.5); padding: 8px 16px; border-radius: 20px;
+    font-size: 13px; z-index: 10; opacity: .85;
+  }
+
+  /* 启动遮罩 */
+  #startMask {
+    position: absolute; inset: 0; background: rgba(0,0,0,.85);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    z-index: 100; gap: 18px; text-align: center; padding: 20px;
+  }
+  #startMask h1 { font-size: 32px; background: linear-gradient(90deg,#f472b6,#facc15,#34d399); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  #startMask p { opacity: .75; max-width: 480px; line-height: 1.7; }
+  #startBtn {
+    padding: 14px 36px; font-size: 16px; border: none; border-radius: 999px;
+    background: linear-gradient(90deg,#ec4899,#f59e0b); color: #fff; cursor: pointer;
+    font-weight: 600; box-shadow: 0 8px 30px rgba(236,72,153,.4);
+  }
+  #startBtn:hover { transform: translateY(-2px); }
+
+  /* 氛围光晕层：随当前颜色呼吸的边缘暗角 + 彩色晕染 */
+  #ambiance {
+    position: absolute; inset: 0; pointer-events: none; z-index: 5;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.55) 100%);
+    transition: box-shadow 0.6s ease;
+    mix-blend-mode: screen;
+    animation: breathe 4s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    0%,100% { opacity: 0.7; }
+    50% { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" autoplay="" playsinline="" muted=""></video>
+  <canvas id="drawCanvas"></canvas>  <!-- 主绘制层：多边形/线条/节点 -->
+  <canvas id="fxCanvas"></canvas>    <!-- 粒子特效层 -->
+  <div id="ambiance"></div>          <!-- 氛围光晕层 -->
+
+  <div id="topbar">
+    <div id="status"><span class="dot"></span><span id="statusText">摄像头未就位</span></div>
+    <div id="styleName">红白</div>
+    <div id="colors"></div>
+    <div id="fps">240 fps</div>
+  </div>
+
+  <div id="hint">按 <b>X</b> 切换风格 · 按 <b>G</b> 开关手势模式（张手=星系/食指=火焰/握拳=蓄力/捏合=扭曲/剪刀=花瓣/三指=护盾/四指=重力）</div>
+  <div id="console"></div>
+
+  <div id="startMask">
+    <h1>手指涂鸦</h1>
+    <p>基于 MediaPipe Hands 的实时手势交互艺术。<br>
+    45 种风格：红白 / 金色 / 螺旋星系 / 流星束 / 指尖环 / 花瓣 / 双手拼接 / 全开花纹 / 五星联珠 / 能量光圈 / 粒子旋涡 / 丝带光带 / 粒子爆炸 / 金色沙粒 / 星光粒子 / 粒子消散 / 光纤粒子 / 萤火虫 / 螺旋光纤 / 霓虹粒子流 / 金粉闪光 / 数字矩阵 / 粒子光柱 / 粒子波浪 / 数据流 / 粒子拖尾 / 粒子线条 / 粒子曲线 / 粒子上升 / 粒子网格 / 星光拖尾 / 能量爆发 / 时空扭曲 / 呼吸森林 / <b style="color:#ff8a3d">火焰披风</b> / <b style="color:#60a5fa">能量护盾</b> / <b style="color:#22d3ee">重力沙盒</b> / <b style="color:#c084fc">弹力绳</b> / <b style="color:#f472b6">蓄力爆发</b> / <b style="color:#facc15">闪电链</b> / <b style="color:#67e8f9">冰棱结晶</b> / <b style="color:#4ade80">藤蔓生长</b> / <b style="color:#f472b6">泡泡梦境</b> / <b style="color:#60a5fa">声波涟漪</b> / <b style="color:#ff8a3d">烟花绽放</b></p>
+    <button id="startBtn">开启摄像头</button>
+  </div>
+</div>
+
+<!-- MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<script>
+/* ============================================================
+   配置
+============================================================ */
+const COLORS = ['#ff3b3b','#ff8a3d','#facc15','#4ade80','#22d3ee','#60a5fa','#c084fc','#f472b6'];
+const STYLES = ['红白','金色','螺旋星系','流星束','指尖环','花瓣','双手拼接','全开花纹','五星联珠','能量光圈','粒子旋涡','丝带光带','粒子爆炸','金色沙粒','星光粒子','粒子消散','光纤粒子','萤火虫','螺旋光纤','霓虹粒子流','金粉闪光','数字矩阵','粒子光柱','粒子波浪','数据流','粒子拖尾','粒子线条','粒子曲线','粒子上升','粒子网格','星光拖尾','能量爆发','时空扭曲','呼吸森林','火焰披风','能量护盾','重力沙盒','弹力绳','蓄力爆发','闪电链','冰棱结晶','藤蔓生长','泡泡梦境','声波涟漪','烟花绽放'];
+const STYLE_LABELS = {
+  '红白':'红白', '金色':'金色', '螺旋星系':'螺旋星系', '流星束':'流星束',
+  '指尖环':'指尖环', '花瓣':'花瓣 · 变换手势看花纹',
+  '双手拼接':'双手拼接 · 星连网', '全开花纹':'全开花纹', '五星联珠':'五星联珠',
+  '能量光圈':'能量光圈 · 放射环', '粒子旋涡':'粒子旋涡 · 黑洞', '丝带光带':'丝带光带',
+  '粒子爆炸':'粒子爆炸 · 粉末爆散', '金色沙粒':'金色沙粒 · 飞沙',
+  '星光粒子':'星光粒子 · 闪耀', '粒子消散':'粒子消散 · 化尘',
+  '光纤粒子':'光纤粒子 · 光丝', '萤火虫':'萤火虫 · 流光',
+  '螺旋光纤':'螺旋光纤 · 盘旋',
+  '霓虹粒子流':'霓虹粒子流 · 蓝光', '金粉闪光':'金粉闪光 · 金沙',
+  '数字矩阵':'数字矩阵 · 代码雨', '粒子光柱':'粒子光柱 · 光束',
+  '粒子波浪':'粒子波浪 · 波纹', '数据流':'数据流 · 01流',
+  '粒子拖尾':'粒子拖尾 · 彗尾', '粒子线条':'粒子线条 · 网络',
+  '粒子曲线':'粒子曲线 · 弧线',
+  '粒子上升':'粒子上升 · 气泡', '粒子网格':'粒子网格 · 点阵',
+  '星光拖尾':'星光拖尾 · 金色流体', '能量爆发':'能量爆发 · 握拳爆裂',
+  '时空扭曲':'时空扭曲 · 捏合黑洞', '呼吸森林':'呼吸森林 · 萤火流光',
+  '火焰披风':'火焰披风 · 速度燃焰', '能量护盾':'能量护盾 · 开合屏障',
+  '重力沙盒':'重力沙盒 · 倾腕引力', '弹力绳':'弹力绳 · 双手光带',
+  '蓄力爆发':'蓄力爆发 · 握拳充能',
+  '闪电链':'闪电链 · 指间电弧', '冰棱结晶':'冰棱结晶 · 凝霜生长',
+  '藤蔓生长':'藤蔓生长 · 指尖生芽', '泡泡梦境':'泡泡梦境 · 气泡漂浮',
+  '声波涟漪':'声波涟漪 · 掌心音波', '烟花绽放':'烟花绽放 · 挥手绽放'
+};
+let currentColor = COLORS[0];
+let currentStyleIdx = 0;
+let globalTime = 0;
+let latestAllPts = null;      // 最新手部数据（由 onResults 更新，render 读取）
+let lastRenderTime = 0;       // 上一帧渲染时间（用于 deltaTime）
+let gestureMode = true; // 手势自动切换风格（视频中的连续性）
+let lastGesture = '';
+let gestureHoldFrames = 0;
+
+// 双手星座网：平滑变换状态
+const constellationState = {
+  left:  { cx:0, cy:0, scale:1, rot:0, active:false },
+  right: { cx:0, cy:0, scale:1, rot:0, active:false }
+};
+let flowParticles = []; // 沿连线流动的粒子
+let globalGravityDir = { x: 0, y: 0.3 }; // 重力沙盒的全局重力方向
+
+// 星座图模式：归一化坐标点 + 连线关系
+// 外层8节点环 + 内层五角星 + 中心点
+const CONSTELLATION_POINTS = (() => {
+  const pts = [];
+  // 外层 8 点环
+  for (let i=0;i<8;i++){
+    const a = i * Math.PI/4;
+    pts.push({x: Math.cos(a), y: Math.sin(a)});
+  }
+  // 内层 5 角星
+  for (let i=0;i<5;i++){
+    const a = i * 2*Math.PI/5 - Math.PI/2;
+    pts.push({x: Math.cos(a)*0.55, y: Math.sin(a)*0.55});
+  }
+  // 中心
+  pts.push({x:0, y:0});
+  return pts; // 14 个点
+})();
+// 连线：[i,j] 索引对，形成星座图
+const CONSTELLATION_LINKS = [
+  // 外环隔点相连（八角星）
+  [0,2],[2,4],[4,6],[6,0],
+  [1,3],[3,5],[5,7],[7,1],
+  // 外环邻接
+  [0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,0],
+  // 五角星
+  [8,10],[10,12],[12,9],[9,11],[11,8],
+  // 内星到外环
+  [8,0],[9,2],[10,4],[11,6],[12,7],
+  // 中心到内星
+  [13,8],[13,9],[13,10],[13,11],[13,12],
+  // 中心到外环偶点
+  [13,0],[13,2],[13,4],[13,6],
+];
+
+const video = document.getElementById('video');
+const drawCanvas = document.getElementById('drawCanvas');
+const fxCanvas = document.getElementById('fxCanvas');
+const dctx = drawCanvas.getContext('2d');
+const fctx = fxCanvas.getContext('2d');
+
+/* 画布尺寸 */
+function resize() {
+  [drawCanvas, fxCanvas].forEach(c => { c.width = innerWidth; c.height = innerHeight; });
+}
+resize(); addEventListener('resize', resize);
+
+/* ============================================================
+   卡尔曼滤波 —— 平滑手部坐标
+============================================================ */
+class Kalman1D {
+  constructor(q=0.05, r=0.3) { this.q=q; this.r=r; this.p=1; this.x=0; this.k=0; this.init=false; }
+  update(z) {
+    if (!this.init) { this.x=z; this.init=true; return z; }
+    this.p += this.q;
+    this.k = this.p / (this.p + this.r);
+    this.x += this.k * (z - this.x);
+    this.p *= (1 - this.k);
+    return this.x;
+  }
+}
+class SmoothHand {
+  constructor() {
+    this.pts = Array.from({length:21}, () => ({ x: new Kalman1D(), y: new Kalman1D() }));
+  }
+  update(lm) {
+    return lm.map((p, i) => ({
+      x: this.pts[i].x.update(p.x),
+      y: this.pts[i].y.update(p.y)
+    }));
+  }
+}
+
+/* ============================================================
+   Perlin 噪声 —— 时空扭曲有机流动感
+============================================================ */
+const Noise = (() => {
+  const perm = new Uint8Array(512);
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [p[i], p[j]] = [p[j], p[i]];
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+  const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+  const lerp = (a, b, t) => a + t * (b - a);
+  const grad = (h, x, y) => {
+    const u = h & 1 ? x : -x;
+    const v = h & 2 ? y : -y;
+    return u + v;
+  };
+  return {
+    noise2D(x, y) {
+      const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+      x -= Math.floor(x); y -= Math.floor(y);
+      const u = fade(x), v = fade(y);
+      const aa = perm[perm[X] + Y], ab = perm[perm[X] + Y + 1];
+      const ba = perm[perm[X + 1] + Y], bb = perm[perm[X + 1] + Y + 1];
+      return lerp(
+        lerp(grad(aa, x, y), grad(ba, x - 1, y), u),
+        lerp(grad(ab, x, y - 1), grad(bb, x - 1, y - 1), u),
+        v
+      );
+    }
+  };
+})();
+
+/* ============================================================
+   手部速度追踪 —— 星光拖尾惯性 + 呼吸森林静止检测
+============================================================ */
+const handVelocity = {}; // handIdx -> {vx, vy, speed, stillFrames}
+function updateHandVelocity(idx, palm) {
+  const prev = handVelocity[idx];
+  if (!prev) {
+    handVelocity[idx] = { vx: 0, vy: 0, speed: 0, stillFrames: 0, lastX: palm.x, lastY: palm.y };
+    return handVelocity[idx];
+  }
+  const vx = palm.x - prev.lastX;
+  const vy = palm.y - prev.lastY;
+  const speed = Math.hypot(vx, vy);
+  // 平滑速度
+  prev.vx = prev.vx * 0.6 + vx * 0.4;
+  prev.vy = prev.vy * 0.6 + vy * 0.4;
+  prev.speed = prev.speed * 0.6 + speed * 0.4;
+  prev.lastX = palm.x;
+  prev.lastY = palm.y;
+  if (prev.speed < 1.5) prev.stillFrames++;
+  else prev.stillFrames = 0;
+  return prev;
+}
+
+/* ============================================================
+   手腕倾斜角计算 —— 重力沙盒用
+   返回 {pitch, roll} 弧度，pitch 为前后倾，roll 为左右倾
+============================================================ */
+function getWristTilt(pts) {
+  // 手腕(0) → 中指根(9) 向量
+  const wrist = pts[0], midMcp = pts[9];
+  const dx = midMcp.x - wrist.x;
+  const dy = midMcp.y - wrist.y;
+  // roll：手腕左右倾斜（绕 Z 轴）
+  const roll = Math.atan2(dy, dx);
+  // pitch：用食指根(5)→小指根(17) 的水平偏移估算前后倾
+  const idxMcp = pts[5], pkyMcp = pts[17];
+  const horizDist = Math.hypot(idxMcp.x - pkyMcp.x, idxMcp.y - pkyMcp.y);
+  const palmLen = Math.hypot(dx, dy) || 1;
+  const pitch = Math.asin(Math.max(-1, Math.min(1, (palmLen - horizDist) / palmLen)));
+  return { pitch, roll, palmLen };
+}
+
+/* ============================================================
+   蓄力爆发状态机 —— 握拳充能 → 张开释放
+============================================================ */
+const chargeState = { charging: false, charge: 0, palm: null };
+function updateChargeState(isFist, palm) {
+  if (isFist) {
+    chargeState.charging = true;
+    chargeState.charge = Math.min(chargeState.charge + 0.02, 1);
+    chargeState.palm = palm;
+  } else if (chargeState.charging) {
+    // 从握拳变为张开 → 释放！
+    chargeState.charging = false;
+    const released = chargeState.charge;
+    chargeState.charge = 0;
+    return { released: true, power: released, palm: chargeState.palm };
+  }
+  return { released: false, power: chargeState.charge, palm };
+}
+
+/* ============================================================
+   粒子系统
+============================================================ */
+const particles = [];
+class Particle {
+  constructor(x, y, color, type='galaxy', opts={}) {
+    this.x=x; this.y=y; this.color=color; this.type=type;
+    this.life = 1;
+    this.angle = opts.angle !== undefined ? opts.angle : Math.random()*Math.PI*2;
+    const sp = opts.speed !== undefined ? opts.speed : (type==='meteor' ? 2+Math.random()*5 : 0.5+Math.random()*2);
+    this.vx = Math.cos(this.angle)*sp;
+    this.vy = Math.sin(this.angle)*sp;
+    if (type==='meteor') this.vy -= 3; // 流星向上喷射
+    const DECAY_MAP = { meteor:0.015, petal:0.012, explosion:0.02, sand:0.012, dissolve:0.025, firefly:0.008, gold:0.01, matrix:0.02, data:0.02, bubble:0.012, ambient:0.012, trail:0.012, burst:0.018, warp:0.015, forest:0.01, fire:0.025, gravity:0.015, ice:0.008, vine:0.006, ripple:0.02, firework:0.014, spark:0.03 };
+    this.decay = DECAY_MAP[type] !== undefined ? DECAY_MAP[type] : 0.01;
+    const r = Math.random();
+    const SIZE_BASE = { meteor:2, petal:2.5, star:4, explosion:2, firefly:2, matrix:10, data:8, ambient:1, trail:2, burst:2.5, warp:1.5, forest:2, fire:3, gravity:2, ice:2, vine:1.5, ripple:2, firework:2.5, spark:1.5, bubble:4, gold:2.5, sand:2, galaxy:2, vortex:1.5, spiral:1.5, neon:2, wave:2, ribbon:2, dissolve:2 };
+    const SIZE_RANGE = { meteor:3, petal:2.5, star:3, explosion:4, firefly:2, matrix:6, data:4, ambient:1.5, trail:2.5, burst:3, warp:2, forest:2, fire:4, gravity:3, ice:3, vine:2, ripple:3, firework:3, spark:1.5, bubble:5, gold:2.5, sand:2, galaxy:2, vortex:2, spiral:2, neon:2, wave:2, ribbon:1.5, dissolve:3 };
+    this.size = (SIZE_BASE[type] !== undefined ? SIZE_BASE[type] : 1.5) + r * (SIZE_RANGE[type] !== undefined ? SIZE_RANGE[type] : 2.5);
+    this.spin = (Math.random()-0.5)*0.15;
+    this.trail = [];
+    this.cx = opts.cx !== undefined ? opts.cx : x;
+    this.cy = opts.cy !== undefined ? opts.cy : y;
+    this.rot = Math.random()*Math.PI*2;
+    this.baseSize = this.size; // 记录基础尺寸用于脉冲
+    this.sizeScale = 1; // 累积缩放因子（供 dissolve 等类型连续修改尺寸用）
+    this.pulse = Math.random()*Math.PI*2;
+    this.hue = opts.hue;
+    this.char = opts.char || (Math.random() < 0.5 ? '0' : '1');
+    this.baseY = y;
+  }
+  step(dt=1) {
+    const damp = (f) => Math.pow(f, dt); // 阻尼的时间缩放：f^dt
+    if (this.type==='galaxy') {
+      this.angle += this.spin * dt;
+      const tx = Math.cos(this.angle), ty = Math.sin(this.angle);
+      this.vx += (tx*0.04 - this.vx*0.02) * dt;
+      this.vy += (ty*0.04 - this.vy*0.02) * dt;
+      const dx = this.x - this.cx, dy = this.y - this.cy;
+      const dist = Math.hypot(dx, dy) || 1;
+      const bounce = Math.sin(globalTime*2 + this.pulse) * 0.15;
+      this.vx += (dx/dist) * bounce * dt;
+      this.vy += (dy/dist) * bounce * dt;
+    } else if (this.type==='petal') {
+      this.vx += (Math.random()-0.5)*0.06 * dt;
+      this.vy += ((Math.random()-0.5)*0.06 - 0.008) * dt;
+      this.vx *= damp(0.97); this.vy *= damp(0.97);
+    } else if (this.type==='meteor') {
+      this.vy += 0.12 * dt;
+    } else if (this.type==='vortex') {
+      const dx = this.cx - this.x, dy = this.cy - this.y;
+      const dist = Math.hypot(dx, dy);
+      const ang = Math.atan2(dy, dx);
+      this.vx += (Math.cos(ang + Math.PI/2) * 0.3 + (dx/dist) * 0.15) * dt;
+      this.vy += (Math.sin(ang + Math.PI/2) * 0.3 + (dy/dist) * 0.15) * dt;
+      this.vx *= damp(0.96); this.vy *= damp(0.96);
+    } else if (this.type==='ribbon') {
+      this.vx *= damp(0.92); this.vy *= damp(0.92);
+    } else if (this.type==='explosion') {
+      this.vx *= damp(0.96); this.vy *= damp(0.96);
+      this.vy += 0.05 * dt;
+    } else if (this.type==='sand') {
+      this.vy += 0.08 * dt;
+      this.vx += (Math.random()-0.5)*0.15 * dt;
+      this.vx *= damp(0.99);
+    } else if (this.type==='star') {
+      this.vx += (Math.random()-0.5)*0.05 * dt;
+      this.vy += (Math.random()-0.5)*0.05 * dt;
+      this.rot += 0.05 * dt;
+      this.vx *= damp(0.98); this.vy *= damp(0.98);
+    } else if (this.type==='dissolve') {
+      this.vx *= damp(0.95); this.vy *= damp(0.95);
+      this.sizeScale *= damp(0.97);
+    } else if (this.type==='firefly') {
+      this.vx += (Math.random()-0.5)*0.2 * dt;
+      this.vy += (Math.random()-0.5)*0.2 * dt;
+      this.vx *= damp(0.96); this.vy *= damp(0.96);
+      this.pulse += 0.1 * dt;
+    } else if (this.type==='spiral') {
+      const dx = this.cx - this.x, dy = this.cy - this.y;
+      const dist = Math.hypot(dx,dy)||1;
+      const ang = Math.atan2(dy,dx);
+      this.vx += (Math.cos(ang+Math.PI/2)*0.25 + (dx/dist)*0.08) * dt;
+      this.vy += (Math.sin(ang+Math.PI/2)*0.25 + (dy/dist)*0.08) * dt;
+      this.vx *= damp(0.95); this.vy *= damp(0.95);
+    } else if (this.type==='neon') {
+      this.vy += 0.02 * dt;
+      this.vx += Math.sin(globalTime*2 + this.pulse)*0.05 * dt;
+    } else if (this.type==='gold') {
+      this.vy += 0.03 * dt;
+      this.vx += (Math.random()-0.5)*0.1 * dt;
+      this.vx *= damp(0.98);
+      this.pulse += 0.3 * dt;
+    } else if (this.type==='matrix') {
+      this.vy += 0.15 * dt;
+      this.vx *= damp(0.98);
+    } else if (this.type==='wave') {
+      this.vy += Math.sin(globalTime*3 + this.pulse) * 0.15 * dt;
+      this.vx *= damp(0.99);
+    } else if (this.type==='data') {
+      this.vx *= damp(0.99); this.vy *= damp(0.99);
+    } else if (this.type==='bubble') {
+      this.vy -= 0.08 * dt;
+      this.vx += (Math.random()-0.5)*0.08 * dt;
+      this.vx *= damp(0.98);
+    } else if (this.type==='trail') {
+      this.vy += 0.06 * dt;
+      this.vx *= damp(0.98); this.vy *= damp(0.98);
+    } else if (this.type==='burst') {
+      this.vx *= damp(0.95); this.vy *= damp(0.95);
+    } else if (this.type==='warp') {
+      const dx = this.cx - this.x, dy = this.cy - this.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const mode = this.warpMode || 'converge';
+      if (mode === 'converge') {
+        this.vx += (dx/dist) * 0.4 * dt;
+        this.vy += (dy/dist) * 0.4 * dt;
+        this.vx *= damp(0.92); this.vy *= damp(0.92);
+      } else {
+        this.vx -= (dx/dist) * 0.3 * dt;
+        this.vy -= (dy/dist) * 0.3 * dt;
+        this.vx *= damp(0.96); this.vy *= damp(0.96);
+      }
+      const n1 = Noise.noise2D(this.x * 0.01, this.y * 0.01 + globalTime);
+      const n2 = Noise.noise2D(this.x * 0.01 + 100, this.y * 0.01 + globalTime);
+      this.vx += n1 * 0.15 * dt;
+      this.vy += n2 * 0.15 * dt;
+    } else if (this.type==='forest') {
+      if (this.scatter) {
+        this.vx *= damp(0.96); this.vy *= damp(0.96);
+      } else {
+        const dx = this.x - this.cx, dy = this.y - this.cy;
+        const dist = Math.hypot(dx, dy) || 1;
+        this.vx += (-dy/dist) * 0.08 * dt;
+        this.vy += (dx/dist) * 0.08 * dt;
+        this.vy -= 0.02 * dt;
+        this.vx *= damp(0.97); this.vy *= damp(0.97);
+      }
+    } else if (this.type==='fire') {
+      this.vy -= 0.12 * dt;
+      this.vx += (Math.random()-0.5)*0.08 * dt;
+      this.vx *= damp(0.98); this.vy *= damp(0.98);
+      this.fireTemp = (this.fireTemp !== undefined ? this.fireTemp : 1) - 0.015 * dt;
+    } else if (this.type==='gravity') {
+      this.vx += globalGravityDir.x * 0.3 * dt;
+      this.vy += globalGravityDir.y * 0.3 * dt;
+      this.vx *= damp(0.99); this.vy *= damp(0.99);
+    } else if (this.type==='ice') {
+      this.vx *= damp(0.97); this.vy *= damp(0.97);
+      this.rot += 0.02 * dt;
+      this.pulse += 0.15 * dt;
+    } else if (this.type==='vine') {
+      this.vx += Math.sin(globalTime*2 + this.pulse) * 0.08 * dt;
+      this.vy -= 0.02 * dt;
+      this.vx *= damp(0.98); this.vy *= damp(0.98);
+      this.rot += 0.03 * dt;
+    } else if (this.type==='ripple') {
+      this.vx = 0; this.vy = 0;
+    } else if (this.type==='firework') {
+      this.vx *= damp(0.97); this.vy *= damp(0.97);
+      this.vy += 0.04 * dt;
+    } else if (this.type==='spark') {
+      this.vx += (Math.random()-0.5)*0.4 * dt;
+      this.vy += (Math.random()-0.5)*0.4 * dt;
+      this.vx *= damp(0.92); this.vy *= damp(0.92);
+    }
+    // 拖尾记录（缩短到 5 段减少绘制开销）
+    this.trail.push({x:this.x, y:this.y});
+    if (this.trail.length > 5) this.trail.shift();
+    this.x += this.vx * dt; this.y += this.vy * dt;
+    if (this.type !== 'petal' && this.type !== 'ribbon') { this.vx *= damp(0.99); this.vy *= damp(0.99); }
+    const pulseVal = 0.7 + 0.3 * Math.sin(globalTime * 4 + this.pulse);
+    this.size = this.baseSize * pulseVal * this.sizeScale;
+    this.life -= this.decay * dt;
+  }
+  draw(ctx) {
+    const a = Math.max(this.life,0);
+    // 拖尾
+    if (this.trail.length > 1 && this.type!=='star') {
+      ctx.strokeStyle = this.color;
+      ctx.globalAlpha = a * 0.4;
+      ctx.lineWidth = this.size * 0.6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(this.trail[0].x, this.trail[0].y);
+      for (let i=1;i<this.trail.length;i++) ctx.lineTo(this.trail[i].x, this.trail[i].y);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = a;
+    ctx.shadowBlur = 6; ctx.shadowColor = this.color;
+    if (this.type === 'star') {
+      // 四角星光
+      const s = this.size;
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.rot);
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      for (let i=0;i<4;i++) {
+        ctx.rotate(Math.PI/2);
+        ctx.moveTo(0,0);
+        ctx.lineTo(s*0.3, s*0.3);
+        ctx.lineTo(0, s*1.6);
+        ctx.lineTo(-s*0.3, s*0.3);
+      }
+      ctx.fill();
+      ctx.beginPath(); ctx.arc(0,0,s*0.5,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    } else if (this.type === 'firefly') {
+      // 萤火虫：脉冲发光
+      const pulse = 0.5 + 0.5*Math.sin(this.pulse);
+      ctx.globalAlpha = a * pulse;
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x,this.y,this.size,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha = a * pulse * 0.3;
+      ctx.beginPath(); ctx.arc(this.x,this.y,this.size*2.5,0,Math.PI*2); ctx.fill();
+    } else if (this.type === 'forest') {
+      // 呼吸森林萤火：绿色脉冲 + 外层光晕
+      const pulse = 0.4 + 0.6 * Math.sin(globalTime * 3 + this.pulse);
+      ctx.globalAlpha = a * pulse;
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = a * pulse * 0.25;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size*3, 0, Math.PI*2); ctx.fill();
+    } else if (this.type === 'fire') {
+      // 火焰：色温渐变（白热→黄→橙→红→暗）
+      const t = Math.max(0, this.fireTemp !== undefined ? this.fireTemp : 1);
+      let fireColor;
+      if (t > 0.7) fireColor = '#ffffff';
+      else if (t > 0.4) fireColor = '#facc15';
+      else if (t > 0.2) fireColor = '#ff8a3d';
+      else fireColor = '#ff3b3b';
+      ctx.globalAlpha = a * t;
+      ctx.shadowColor = fireColor;
+      ctx.fillStyle = fireColor;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size * t, 0, Math.PI*2); ctx.fill();
+    } else if (this.type === 'gold') {
+      // 金粉：十字闪光
+      const s = this.size * (0.7 + 0.6*Math.sin(this.pulse));
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x,this.y,s*0.6,0,Math.PI*2); ctx.fill();
+      ctx.globalAlpha = a*0.6;
+      ctx.fillRect(this.x-s*1.8, this.y-s*0.15, s*3.6, s*0.3);
+      ctx.fillRect(this.x-s*0.15, this.y-s*1.8, s*0.3, s*3.6);
+    } else if (this.type === 'bubble') {
+      // 泡泡：虹彩半透明球体 + 高光
+      const r = this.bubbleR || this.size*2;
+      ctx.globalAlpha = a * 0.5;
+      const g = ctx.createRadialGradient(this.x-r*0.3, this.y-r*0.3, 0, this.x, this.y, r);
+      g.addColorStop(0, 'rgba(255,255,255,0.8)');
+      g.addColorStop(0.3, this.color + '88');
+      g.addColorStop(0.8, this.color + '44');
+      g.addColorStop(1, this.color + '11');
+      ctx.fillStyle = g;
+      ctx.shadowBlur = 10; ctx.shadowColor = this.color;
+      ctx.beginPath(); ctx.arc(this.x, this.y, r, 0, Math.PI*2); ctx.fill();
+      // 高光点
+      ctx.globalAlpha = a * 0.9;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(this.x - r*0.35, this.y - r*0.35, r*0.18, 0, Math.PI*2); ctx.fill();
+    } else if (this.type === 'ice') {
+      // 冰棱：六边形晶体 + 闪烁光晕
+      const shimmer = 0.6 + 0.4 * Math.sin(this.pulse);
+      ctx.globalAlpha = a * shimmer;
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.rot);
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      for (let i=0;i<6;i++) {
+        const aa = i * Math.PI/3;
+        const r = this.size * (i%2 ? 0.5 : 1);
+        const px = Math.cos(aa)*r, py = Math.sin(aa)*r;
+        if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      // 内部高光
+      ctx.globalAlpha = a * shimmer * 0.5;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(0,0,this.size*0.3,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    } else if (this.type === 'vine') {
+      // 藤蔓：叶子形状（椭圆 + 叶脉）
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.rot);
+      ctx.fillStyle = this.color;
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, this.size, this.size*0.5, 0, 0, Math.PI*2);
+      ctx.fill();
+      // 叶脉
+      ctx.globalAlpha = a * 0.6;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-this.size, 0); ctx.lineTo(this.size, 0); ctx.stroke();
+      ctx.restore();
+    } else if (this.type === 'ripple') {
+      // 声波涟漪：扩散圆环（半径由生命决定）
+      const radius = (1 - this.life) * (this.baseSize * 6) + 5;
+      ctx.globalAlpha = a * 0.8;
+      ctx.strokeStyle = this.color;
+      ctx.lineWidth = 3 * this.life + 1;
+      ctx.shadowBlur = 15; ctx.shadowColor = this.color;
+      ctx.beginPath(); ctx.arc(this.x, this.y, radius, 0, Math.PI*2); ctx.stroke();
+      // 内层淡填充
+      ctx.globalAlpha = a * 0.1;
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x, this.y, radius, 0, Math.PI*2); ctx.fill();
+    } else if (this.type === 'firework') {
+      // 烟花：明亮核心 + 拖尾光晕
+      ctx.globalAlpha = a;
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+      // 外层光晕
+      ctx.globalAlpha = a * 0.3;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size*2.5, 0, Math.PI*2); ctx.fill();
+    } else if (this.type === 'spark') {
+      // 电火花：明亮小亮点
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size*0.5, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = a * 0.6;
+      ctx.fillStyle = this.color;
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI*2); ctx.fill();
+    } else if (this.type === 'matrix' || this.type === 'data') {
+      // 数字/字符渲染
+      ctx.fillStyle = this.color;
+      ctx.font = `bold ${this.size}px monospace`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      // 随机闪烁换字符
+      if (Math.random() < 0.3) this.char = Math.random() < 0.5 ? '0' : '1';
+      ctx.fillText(this.char, this.x, this.y);
+    } else {
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  }
+}
+
+// 丝带轨迹（每个指尖一条）
+const ribbonTrails = {}; // handIdx_tipIdx -> [{x,y,life}]
+
+/* ============================================================
+   MediaPipe Hands
+============================================================ */
+const hands = new Hands({
+  locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.5
+});
+
+const handSmoothers = {};   // handIndex -> SmoothHand
+
+hands.onResults(onResults);
+
+function onResults(results) {
+  const W = drawCanvas.width, H = drawCanvas.height;
+
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    latestAllPts = null;
+    // 清空丝带轨迹
+    for (const k in ribbonTrails) delete ribbonTrails[k];
+    return;
+  }
+
+  // 转换所有手的坐标 + 对全部21点卡尔曼平滑（丝滑关键）
+  const allPts = results.multiHandLandmarks.map((lm, idx) => {
+    if (!handSmoothers[idx]) handSmoothers[idx] = new SmoothHand();
+    const raw = lm.map(p => ({ x: (1-p.x)*W, y: p.y*H }));
+    return handSmoothers[idx].update(raw);
+  });
+  latestAllPts = allPts; // 存储供 render() 使用
+
+  // ⚡ 速度追踪必须在 onResults 中更新（仅当新手部数据到达时），
+  //    若放在 60fps 的 render() 中，检测间隔内位置不变会使速度被平滑到 0
+  allPts.forEach((pts, idx) => updateHandVelocity(idx, pts[9]));
+
+  // 手势识别：判断手指伸展状态
+  function getGesture(pts) {
+    const palm = pts[9];
+    const ext = [4, 8, 12, 16, 20].map((tip, fi) => {
+      const pip = [3, 6, 10, 14, 18][fi];
+      const dTip = Math.hypot(pts[tip].x-palm.x, pts[tip].y-palm.y);
+      const dPip = Math.hypot(pts[pip].x-palm.x, pts[pip].y-palm.y);
+      return dTip > dPip * 1.15;
+    });
+    const [t, i, m, r, p] = ext;
+    const cnt = ext.filter(Boolean).length;
+    const pinchDist = Math.hypot(pts[4].x-pts[8].x, pts[4].y-pts[8].y);
+    if (pinchDist < 35 && !m && !r && !p) return 'pinch';
+    if (cnt === 0) return 'fist';
+    if (cnt === 5) return 'open';
+    if (i && m && r && !p && !t) return 'three';
+    if (i && m && !r && !p) return 'peace';
+    if (i && !m && !r && !p) return 'point';
+    if (i && m && r && p && !t) return 'four';
+    return 'other';
+  }
+  // 手势 → 风格映射（单手时）
+  const GESTURE_STYLE = {
+    'open':  '螺旋星系',   // 张开五指 → 掌心星系旋臂
+    'point': '火焰披风',   // 食指指向 → 移动燃焰
+    'fist':  '蓄力爆发',   // 握拳 → 蓄力充能，张开爆发
+    'pinch': '时空扭曲',   // 捏合 → 蓝色粒子汇聚黑洞/拉开爆炸
+    'peace': '花瓣',       // 剪刀手 → 掌心花瓣绽放
+    'three': '能量护盾',   // 三指 → 开合能量屏障
+    'four':  '重力沙盒'    // 四指 → 倾腕改变重力
+  };
+
+  // 手势自动切换风格（连续性核心）
+  if (gestureMode && allPts.length === 1) {
+    const g = getGesture(allPts[0]);
+    if (g === lastGesture) {
+      gestureHoldFrames++;
+    } else {
+      lastGesture = g;
+      gestureHoldFrames = 0;
+    }
+    // 连续 6 帧同一手势才切换，防抖
+    if (gestureHoldFrames === 6 && GESTURE_STYLE[g]) {
+      const targetIdx = STYLES.indexOf(GESTURE_STYLE[g]);
+      if (targetIdx >= 0 && targetIdx !== currentStyleIdx) {
+        setStyle(targetIdx, allPts[0][9]); // 传递掌心位置作为过渡波纹原点
+      }
+    }
+  } else if (allPts.length >= 2) {
+    // 双手自动切到双手拼接（弹力绳需手动 X 切换）
+    if (gestureMode && STYLES[currentStyleIdx] !== '双手拼接' && STYLES[currentStyleIdx] !== '红白' && STYLES[currentStyleIdx] !== '金色' && STYLES[currentStyleIdx] !== '弹力绳') {
+      setStyle(STYLES.indexOf('双手拼接'), allPts[0][9]);
+    }
+  }
+  // onResults 到此结束：只负责手部数据更新 + 手势识别，渲染交给 render()
+}
+
+/* ============================================================
+   渲染循环：独立于 MediaPipe 检测，以 requestAnimationFrame 稳定 60fps 运行
+   render() 只负责计时与调度（即使帧体出错或提前 return 也不会中断循环），
+   真正的绘制逻辑放在 renderFrame() 中。
+============================================================ */
+function render() {
+  const now = performance.now();
+  // deltaTime：归一化到 60fps（dt=1 表示一帧 16.67ms），上限 2.5 防止切后台后跳变
+  const dt = lastRenderTime ? Math.min((now - lastRenderTime) / 16.67, 2.5) : 1;
+  lastRenderTime = now;
+  try {
+    renderFrame(dt);
+  } catch (err) {
+    // 单帧异常不应杀死整个渲染循环
+    console.warn('渲染帧异常（已跳过该帧）:', err);
+  }
+  requestAnimationFrame(render); // 无条件调度下一帧
+}
+
+function renderFrame(dt) {
+  const W = drawCanvas.width, H = drawCanvas.height;
+  globalTime += 0.05 * dt;
+
+  /* 清空动态层 */
+  dctx.clearRect(0, 0, W, H);
+  fctx.clearRect(0, 0, W, H);
+
+  const allPts = latestAllPts;
+  if (!allPts) {
+    // 无手时仍更新已有粒子（让残留粒子自然消散）
+    updateAndDrawParticles(dt);
+    return;
+  }
+
+  const style = STYLES[currentStyleIdx];
+  const tips = [4, 8, 12, 16, 20];
+
+  /* ============================================================
+     双手风格：红白 / 金色 / 双手拼接
+  ============================================================ */
+  if ((style === '红白' || style === '金色' || style === '双手拼接') && allPts.length >= 2) {
+    const h1 = allPts[0], h2 = allPts[1];
+
+    if (style === '红白' || style === '金色') {
+      // 取双手食指尖(8)和小指尖(20)，共4点形成连接双手的四边形
+      const p1 = h1[8], p2 = h1[20], p3 = h2[8], p4 = h2[20];
+      const quad = [p1, p3, p4, p2];
+
+      if (style === '红白') {
+        dctx.fillStyle = 'rgba(255, 59, 59, 0.45)';
+        dctx.strokeStyle = 'rgba(255, 59, 59, 0.9)';
+        dctx.lineWidth = 2;
+        dctx.setLineDash([6, 4]);
+        dctx.shadowBlur = 15; dctx.shadowColor = '#ff3b3b';
+        dctx.beginPath();
+        dctx.moveTo(quad[0].x, quad[0].y);
+        for (let i=1;i<quad.length;i++) dctx.lineTo(quad[i].x, quad[i].y);
+        dctx.closePath();
+        dctx.fill(); dctx.stroke();
+        dctx.setLineDash([]);
+        // 四个顶点白色亮点
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 12;
+        quad.forEach(p => { dctx.beginPath(); dctx.arc(p.x,p.y,4,0,Math.PI*2); dctx.fill(); });
+        dctx.shadowBlur = 0;
+      }
+      else { // 金色
+        dctx.fillStyle = 'rgba(128, 128, 128, 0.25)';
+        dctx.strokeStyle = '#facc15';
+        dctx.lineWidth = 2;
+        dctx.setLineDash([6, 4]);
+        dctx.shadowBlur = 12; dctx.shadowColor = '#facc15';
+        dctx.beginPath();
+        dctx.moveTo(quad[0].x, quad[0].y);
+        for (let i=1;i<quad.length;i++) dctx.lineTo(quad[i].x, quad[i].y);
+        dctx.closePath();
+        dctx.fill(); dctx.stroke();
+        dctx.setLineDash([]);
+        // 四个顶点金色亮点
+        dctx.fillStyle = '#facc15';
+        dctx.shadowBlur = 12;
+        quad.forEach(p => { dctx.beginPath(); dctx.arc(p.x,p.y,4,0,Math.PI*2); dctx.fill(); });
+        dctx.shadowBlur = 0;
+      }
+    }
+    else if (style === '双手拼接') {
+      dctx.lineCap = 'round';
+      const lerp = (a,b,t)=>a+(b-a)*t;
+      const autoRot = globalTime * 0.3; // 整体缓慢自转
+
+      // 计算并平滑每只手的变换
+      function handTransform(pts, state) {
+        const cx_t = pts[9].x, cy_t = pts[9].y;
+        const tipsArr = [4,8,12,16,20].map(i=>pts[i]);
+        let s = 0;
+        tipsArr.forEach(p => s += Math.hypot(p.x-pts[9].x, p.y-pts[9].y));
+        s = (s/5) * 1.6; // 归一化星座半径
+        const r = Math.atan2(pts[12].y - pts[0].y, pts[12].x - pts[0].x);
+        // 角度差最短路径平滑
+        let dr = r - state.rot;
+        while (dr > Math.PI) dr -= Math.PI*2;
+        while (dr < -Math.PI) dr += Math.PI*2;
+        state.cx = lerp(state.cx, cx_t, 0.3);
+        state.cy = lerp(state.cy, cy_t, 0.3);
+        state.scale = lerp(state.scale, s, 0.3);
+        state.rot = state.rot + dr * 0.3;
+        state.active = true;
+      }
+      handTransform(h1, constellationState.left);
+      handTransform(h2, constellationState.right);
+
+      // 双手中心连线（能量桥）
+      const L = constellationState.left, R = constellationState.right;
+      dctx.strokeStyle = currentColor;
+      dctx.shadowBlur = 20; dctx.shadowColor = currentColor;
+      dctx.lineWidth = 2.5;
+      dctx.globalAlpha = 0.8;
+      dctx.beginPath(); dctx.moveTo(L.cx, L.cy); dctx.lineTo(R.cx, R.cy); dctx.stroke();
+      // 能量桥流动光带
+      const bridgeGrad = dctx.createLinearGradient(L.cx, L.cy, R.cx, R.cy);
+      bridgeGrad.addColorStop(0, 'rgba(245,158,11,0)');
+      bridgeGrad.addColorStop(0.5, currentColor);
+      bridgeGrad.addColorStop(1, 'rgba(96,165,250,0)');
+      dctx.strokeStyle = bridgeGrad;
+      dctx.lineWidth = 6;
+      dctx.globalAlpha = 0.5 + 0.3*Math.sin(globalTime*4);
+      dctx.beginPath(); dctx.moveTo(L.cx, L.cy); dctx.lineTo(R.cx, R.cy); dctx.stroke();
+      dctx.globalAlpha = 1;
+
+      // 绘制单只手的星座网
+      function drawConstellation(state, color, innerColor) {
+        const rot = state.rot + autoRot;
+        const cos = Math.cos(rot), sin = Math.sin(rot);
+        const s = state.scale;
+        // 变换所有星座点
+        const tpts = CONSTELLATION_POINTS.map(p => ({
+          x: state.cx + (p.x*cos - p.y*sin) * s,
+          y: state.cy + (p.x*sin + p.y*cos) * s
+        }));
+        // 连线（双层发光）
+        dctx.strokeStyle = color;
+        dctx.shadowBlur = 14; dctx.shadowColor = color;
+        dctx.lineWidth = 1.8;
+        CONSTELLATION_LINKS.forEach(([i,j]) => {
+          dctx.globalAlpha = 0.85;
+          dctx.beginPath();
+          dctx.moveTo(tpts[i].x, tpts[i].y);
+          dctx.lineTo(tpts[j].x, tpts[j].y);
+          dctx.stroke();
+        });
+        // 内层高光线
+        dctx.strokeStyle = '#ffffff';
+        dctx.shadowBlur = 6;
+        dctx.lineWidth = 0.6;
+        dctx.globalAlpha = 0.5;
+        CONSTELLATION_LINKS.forEach(([i,j]) => {
+          dctx.beginPath();
+          dctx.moveTo(tpts[i].x, tpts[i].y);
+          dctx.lineTo(tpts[j].x, tpts[j].y);
+          dctx.stroke();
+        });
+        dctx.globalAlpha = 1;
+        // 节点
+        tpts.forEach((p, i) => {
+          const isCenter = i === 13;
+          const r = isCenter ? 5 : 2.5;
+          dctx.fillStyle = isCenter ? '#fff' : color;
+          dctx.shadowBlur = isCenter ? 20 : 10;
+          dctx.shadowColor = isCenter ? innerColor : color;
+          dctx.beginPath(); dctx.arc(p.x, p.y, r, 0, Math.PI*2); dctx.fill();
+        });
+        // 沿连线生成流动粒子
+        if (Math.random() < 0.6) {
+          const link = CONSTELLATION_LINKS[Math.floor(Math.random()*CONSTELLATION_LINKS.length)];
+          const a = tpts[link[0]], b = tpts[link[1]];
+          flowParticles.push({
+            ax:a.x, ay:a.y, bx:b.x, by:b.y,
+            t: 0, speed: 0.02+Math.random()*0.03,
+            color: color, size: 1.5+Math.random()*1.5
+          });
+        }
+      }
+      drawConstellation(L, '#f59e0b', '#fbbf24'); // 左手金
+      drawConstellation(R, '#60a5fa', '#93c5fd'); // 右手蓝
+
+      dctx.shadowBlur = 0;
+    }
+    return;
+  }
+
+  allPts.forEach((pts, idx) => {
+    const palm = pts[9];
+    const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+    const lerp = (a,b,t)=>a+(b-a)*t;
+    // 读取 onResults 中已计算好的手部速度（不能在这里重算，否则 60fps 渲染会把速度洗成 0）
+    const vel = handVelocity[idx] || { vx:0, vy:0, speed:0, stillFrames:0 };
+
+    /* ===== 通用增强层：所有单手握风格叠加的复合光效 ===== */
+    // 1. 掌心柔和光晕（径向渐变）
+    const auraR = 40 + 10*Math.sin(globalTime*2 + idx);
+    const auraGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, auraR);
+    auraGrad.addColorStop(0, currentColor+'44');
+    auraGrad.addColorStop(0.5, currentColor+'18');
+    auraGrad.addColorStop(1, currentColor+'00');
+    dctx.fillStyle = auraGrad;
+    dctx.beginPath(); dctx.arc(palm.x, palm.y, auraR, 0, Math.PI*2); dctx.fill();
+
+    // 2. 指尖发光点
+    tipsArr.forEach((p, i) => {
+      const pulse = 0.6 + 0.4*Math.sin(globalTime*3 + i);
+      dctx.fillStyle = '#ffffff';
+      dctx.shadowBlur = 12; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(p.x, p.y, 2.5*pulse, 0, Math.PI*2); dctx.fill();
+    });
+
+    // 3. 指节间微光连线（半透明手骨）
+    dctx.strokeStyle = currentColor;
+    dctx.shadowBlur = 4; dctx.shadowColor = currentColor;
+    dctx.lineWidth = 1;
+    dctx.globalAlpha = 0.25;
+    const boneLinks = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+    boneLinks.forEach(([i,j]) => {
+      dctx.beginPath(); dctx.moveTo(pts[i].x, pts[i].y); dctx.lineTo(pts[j].x, pts[j].y); dctx.stroke();
+    });
+    dctx.globalAlpha = 1;
+    dctx.shadowBlur = 0;
+
+    // 4. 掌心环境粒子（少量）
+    if (Math.random() < 0.3) {
+      const ang = Math.random()*Math.PI*2;
+      particles.push(new Particle(palm.x, palm.y, currentColor, 'ambient', {angle: ang, speed: 0.5+Math.random()*0.8}));
+    }
+
+    /* --- 螺旋星系：掌心 + 旋臂粒子 --- */
+    if (style === '螺旋星系') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i=>pts[i]);
+      // 多层粒子：掌心核心 + 指尖旋臂
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<4;i++) {
+          particles.push(new Particle(p.x, p.y, currentColor, 'galaxy'));
+        }
+      });
+      // 旋臂光弧（2条旋转弧线）
+      dctx.strokeStyle = currentColor;
+      dctx.shadowBlur = 18; dctx.shadowColor = currentColor;
+      dctx.lineWidth = 2;
+      for (let arm=0; arm<2; arm++) {
+        const baseAng = globalTime*1.5 + arm*Math.PI;
+        dctx.beginPath();
+        for (let t=0; t<=1; t+=0.04) {
+          const r = 20 + t*60;
+          const a = baseAng + t*Math.PI*2.5;
+          const x = palm.x + Math.cos(a)*r;
+          const y = palm.y + Math.sin(a)*r;
+          t===0 ? dctx.moveTo(x,y) : dctx.lineTo(x,y);
+        }
+        dctx.globalAlpha = 0.6;
+        dctx.stroke();
+      }
+      // 轨道环（3层虚线环）
+      dctx.globalAlpha = 0.3;
+      dctx.setLineDash([4, 8]);
+      dctx.lineWidth = 1;
+      for (let r=30; r<=90; r+=30) {
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, r, globalTime*0.5, globalTime*0.5+Math.PI*1.5); dctx.stroke();
+      }
+      dctx.setLineDash([]);
+      // 掌心核心：多层光晕 + 白核
+      const coreGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 25);
+      coreGrad.addColorStop(0, '#ffffff');
+      coreGrad.addColorStop(0.3, currentColor);
+      coreGrad.addColorStop(1, currentColor+'00');
+      dctx.fillStyle = coreGrad;
+      dctx.shadowBlur = 35; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 25, 0, Math.PI*2); dctx.fill();
+      dctx.globalAlpha = 1;
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 流星束：食指尖能量光束 + 流星 --- */
+    if (style === '流星束') {
+      const tip = pts[8];
+      const mcp = pts[5]; // 食指根部，确定光束方向
+      const ang = Math.atan2(tip.y - mcp.y, tip.x - mcp.x);
+      const beamLen = 140;
+      const ex = tip.x + Math.cos(ang)*beamLen, ey = tip.y + Math.sin(ang)*beamLen;
+      // 外层粗光束
+      const grad = dctx.createLinearGradient(tip.x, tip.y, ex, ey);
+      grad.addColorStop(0, currentColor);
+      grad.addColorStop(1, currentColor+'00');
+      dctx.strokeStyle = grad;
+      dctx.lineWidth = 10;
+      dctx.lineCap = 'round';
+      dctx.shadowBlur = 25; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.moveTo(tip.x, tip.y); dctx.lineTo(ex, ey); dctx.stroke();
+      // 内层白色亮芯
+      dctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      dctx.lineWidth = 3;
+      dctx.shadowBlur = 10;
+      dctx.beginPath(); dctx.moveTo(tip.x, tip.y); dctx.lineTo(ex, ey); dctx.stroke();
+      // 光束中的能量脉冲（移动光点）
+      const pulseT = (globalTime*0.8) % 1;
+      const px = tip.x + (ex-tip.x)*pulseT, py = tip.y + (ey-tip.y)*pulseT;
+      dctx.fillStyle = '#fff';
+      dctx.shadowBlur = 20; dctx.shadowColor = '#fff';
+      dctx.beginPath(); dctx.arc(px, py, 4, 0, Math.PI*2); dctx.fill();
+      // 沿光束发射流星粒子
+      for (let i=0;i<8;i++) {
+        particles.push(new Particle(tip.x, tip.y, currentColor, 'meteor', {angle: ang + (Math.random()-0.5)*0.6}));
+      }
+      // 指尖爆发核心：多层光晕
+      const coreGrad = dctx.createRadialGradient(tip.x, tip.y, 0, tip.x, tip.y, 18);
+      coreGrad.addColorStop(0, '#ffffff');
+      coreGrad.addColorStop(0.4, currentColor);
+      coreGrad.addColorStop(1, currentColor+'00');
+      dctx.fillStyle = coreGrad;
+      dctx.shadowBlur = 40; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(tip.x, tip.y, 18, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 指尖环：每个指尖旋转光环 --- */
+    if (style === '指尖环') {
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      dctx.lineCap = 'round';
+      tipsArr.forEach((p, idx) => {
+        const breathe = 1 + Math.sin(globalTime*2 + idx)*0.15;
+        // 外环（顺时针旋转，3/4 圆弧）
+        const r1 = 22 * breathe;
+        const start1 = globalTime * 1.5 + idx;
+        dctx.strokeStyle = currentColor;
+        dctx.lineWidth = 3;
+        dctx.shadowBlur = 14; dctx.shadowColor = currentColor;
+        dctx.beginPath();
+        dctx.arc(p.x, p.y, r1, start1, start1 + Math.PI*1.5);
+        dctx.stroke();
+        // 内环（逆时针旋转，半圆弧）
+        const r2 = 12 * breathe;
+        const start2 = -globalTime * 2 + idx;
+        dctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        dctx.lineWidth = 2;
+        dctx.shadowColor = '#fff';
+        dctx.beginPath();
+        dctx.arc(p.x, p.y, r2, start2, start2 + Math.PI);
+        dctx.stroke();
+        // 中心白色亮点
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 12; dctx.shadowColor = currentColor;
+        dctx.beginPath(); dctx.arc(p.x, p.y, 4, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 花瓣：掌心绽放花瓣 --- */
+    if (style === '花瓣') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20];
+      let spread = 0;
+      tipsArr.forEach(ti => { spread += Math.hypot(pts[ti].x-palm.x, pts[ti].y-palm.y); });
+      spread /= tipsArr.length;
+      const openness = Math.min(spread / 120, 1);
+      const petalCount = 6 + Math.floor(openness * 12);
+      // 花瓣粒子
+      for (let i=0;i<petalCount;i++){
+        const a = (i / petalCount) * Math.PI * 2 + globalTime * 0.5;
+        const dist = 25 + openness * 80 + Math.sin(globalTime*3 + i)*12;
+        const px = palm.x + Math.cos(a) * dist;
+        const py = palm.y + Math.sin(a) * dist;
+        particles.push(new Particle(px, py, currentColor, 'petal'));
+      }
+      // 掌心核心
+      dctx.fillStyle = currentColor;
+      dctx.shadowBlur = 20; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 6+openness*5, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 全开花纹：关键点网状 + 流动粒子 --- */
+    if (style === '全开花纹') {
+      dctx.strokeStyle = currentColor;
+      dctx.lineWidth = 1.2;
+      dctx.shadowBlur = 8; dctx.shadowColor = currentColor;
+      for (let i=0;i<pts.length;i++){
+        for (let j=i+1;j<pts.length;j++){
+          const dist = Math.hypot(pts[i].x-pts[j].x, pts[i].y-pts[j].y);
+          if (dist < 140) {
+            dctx.globalAlpha = (1 - dist/140) * 0.9;
+            dctx.beginPath();
+            dctx.moveTo(pts[i].x, pts[i].y);
+            dctx.lineTo(pts[j].x, pts[j].y);
+            dctx.stroke();
+          }
+        }
+      }
+      dctx.globalAlpha = 1;
+      // 白色节点带辉光
+      dctx.fillStyle = '#fff';
+      pts.forEach(p => {
+        dctx.shadowBlur = 10; dctx.shadowColor = currentColor;
+        dctx.beginPath(); dctx.arc(p.x,p.y,3.5,0,Math.PI*2); dctx.fill();
+      });
+      // 随机在节点间发射流动粒子
+      if (Math.random() < 0.5) {
+        const a = pts[Math.floor(Math.random()*pts.length)];
+        const b = pts[Math.floor(Math.random()*pts.length)];
+        particles.push(new Particle((a.x+b.x)/2, (a.y+b.y)/2, currentColor, 'galaxy'));
+      }
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 五星联珠：五角星 --- */
+    if (style === '五星联珠') {
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      // 五角星
+      dctx.strokeStyle = currentColor;
+      dctx.lineWidth = 3;
+      dctx.lineCap = 'round'; dctx.lineJoin = 'round';
+      dctx.shadowBlur = 16; dctx.shadowColor = currentColor;
+      const order = [0, 2, 4, 1, 3, 0];
+      dctx.beginPath();
+      dctx.moveTo(tipsArr[order[0]].x, tipsArr[order[0]].y);
+      for (let i=1;i<order.length;i++){
+        dctx.lineTo(tipsArr[order[i]].x, tipsArr[order[i]].y);
+      }
+      dctx.stroke();
+      // 白色光珠 + 彩色内珠
+      tipsArr.forEach(p => {
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 12;
+        dctx.beginPath(); dctx.arc(p.x,p.y,5,0,Math.PI*2); dctx.fill();
+        dctx.fillStyle = currentColor;
+        dctx.beginPath(); dctx.arc(p.x,p.y,3,0,Math.PI*2); dctx.fill();
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 能量光圈：掌心放射多层能量环 --- */
+    if (style === '能量光圈') {
+      const palm = pts[9];
+      // 中心核心
+      dctx.fillStyle = '#fff';
+      dctx.shadowBlur = 30; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 8, 0, Math.PI*2); dctx.fill();
+      // 多层放射环
+      for (let r = 1; r <= 4; r++) {
+        const phase = (globalTime * 0.5 + r * 0.25) % 1;
+        const radius = 20 + phase * 100;
+        const alpha = (1 - phase) * 0.8;
+        dctx.strokeStyle = currentColor;
+        dctx.globalAlpha = alpha;
+        dctx.lineWidth = 3 * (1 - phase) + 1;
+        dctx.shadowBlur = 15; dctx.shadowColor = currentColor;
+        dctx.beginPath();
+        dctx.arc(palm.x, palm.y, radius, 0, Math.PI*2);
+        dctx.stroke();
+        // 环上光点
+        dctx.fillStyle = currentColor;
+        for (let s = 0; s < 8; s++) {
+          const a = (s / 8) * Math.PI * 2 + globalTime * (r % 2 ? 1 : -1);
+          dctx.beginPath();
+          dctx.arc(palm.x + Math.cos(a)*radius, palm.y + Math.sin(a)*radius, 2, 0, Math.PI*2);
+          dctx.fill();
+        }
+      }
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子旋涡：掌心黑洞吸入粒子 --- */
+    if (style === '粒子旋涡') {
+      const palm = pts[9];
+      // 黑洞核心
+      const grad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 35);
+      grad.addColorStop(0, '#000');
+      grad.addColorStop(0.5, currentColor);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      dctx.fillStyle = grad;
+      dctx.shadowBlur = 25; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 35, 0, Math.PI*2); dctx.fill();
+      // 吸积盘旋转光环
+      dctx.strokeStyle = currentColor;
+      dctx.lineWidth = 2;
+      dctx.shadowBlur = 12;
+      for (let r = 1; r <= 3; r++) {
+        const rad = 15 + r * 12;
+        const rot = globalTime * (r % 2 ? 2 : -2);
+        dctx.globalAlpha = 0.6;
+        dctx.beginPath();
+        dctx.arc(palm.x, palm.y, rad, rot, rot + Math.PI*1.3);
+        dctx.stroke();
+      }
+      dctx.globalAlpha = 1;
+      // 从周围发射吸入粒子
+      const tipsArr = [4, 8, 12, 16, 20].map(i=>pts[i]);
+      tipsArr.forEach(tip => {
+        for (let i=0;i<3;i++) {
+          const ang = Math.random()*Math.PI*2;
+          const dist = 80 + Math.random()*60;
+          particles.push(new Particle(
+            tip.x + Math.cos(ang)*dist,
+            tip.y + Math.sin(ang)*dist,
+            currentColor, 'vortex',
+            {cx: palm.x, cy: palm.y}
+          ));
+        }
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 丝带光带：指尖拖出彩带 --- */
+    if (style === '丝带光带') {
+      const tipsArr = [4, 8, 12, 16, 20];
+      dctx.lineCap = 'round'; dctx.lineJoin = 'round';
+      tipsArr.forEach((ti, tIdx) => {
+        const key = `${idx}_${tIdx}`;
+        const p = pts[ti];
+        if (!ribbonTrails[key]) ribbonTrails[key] = [];
+        ribbonTrails[key].push({x: p.x, y: p.y, life: 1});
+        if (ribbonTrails[key].length > 40) ribbonTrails[key].shift();
+        // 绘制丝带
+        const trail = ribbonTrails[key];
+        if (trail.length > 2) {
+          // 外发光宽带
+          dctx.strokeStyle = currentColor;
+          dctx.lineWidth = 10;
+          dctx.globalAlpha = 0.25;
+          dctx.shadowBlur = 20; dctx.shadowColor = currentColor;
+          dctx.beginPath();
+          dctx.moveTo(trail[0].x, trail[0].y);
+          for (let i=1;i<trail.length;i++) dctx.lineTo(trail[i].x, trail[i].y);
+          dctx.stroke();
+          // 内亮线
+          dctx.strokeStyle = '#fff';
+          dctx.lineWidth = 3;
+          dctx.globalAlpha = 0.9;
+          dctx.shadowBlur = 10;
+          dctx.beginPath();
+          dctx.moveTo(trail[0].x, trail[0].y);
+          for (let i=1;i<trail.length;i++) dctx.lineTo(trail[i].x, trail[i].y);
+          dctx.stroke();
+        }
+        // 指尖亮点
+        dctx.fillStyle = '#fff';
+        dctx.globalAlpha = 1;
+        dctx.shadowBlur = 15; dctx.shadowColor = currentColor;
+        dctx.beginPath(); dctx.arc(p.x, p.y, 5, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子爆炸：掌心彩色粉末爆散 --- */
+    if (style === '粒子爆炸') {
+      const palm = pts[9];
+      // 多色爆炸粒子
+      const colors = ['#ff3b3b','#ff8a3d','#facc15','#4ade80','#22d3ee','#60a5fa','#c084fc','#f472b6'];
+      for (let i=0;i<8;i++) {
+        const ang = Math.random()*Math.PI*2;
+        const sp = 3+Math.random()*6;
+        particles.push(new Particle(palm.x, palm.y, colors[Math.floor(Math.random()*colors.length)], 'explosion', {angle:ang, speed:sp}));
+      }
+      // 掌心闪光核心
+      dctx.fillStyle = '#fff';
+      dctx.shadowBlur = 30; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 8+Math.sin(globalTime*10)*3, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 金色沙粒：指尖飞沙 --- */
+    if (style === '金色沙粒') {
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      tipsArr.forEach(p => {
+        for (let i=0;i<4;i++) {
+          const ang = -Math.PI/2 + (Math.random()-0.5)*1.2;
+          particles.push(new Particle(p.x, p.y, '#facc15', 'sand', {angle:ang, speed:1+Math.random()*2}));
+        }
+        // 指尖金色光点
+        dctx.fillStyle = '#fde68a';
+        dctx.shadowBlur = 15; dctx.shadowColor = '#facc15';
+        dctx.beginPath(); dctx.arc(p.x, p.y, 3, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 星光粒子：飘浮闪耀星光 --- */
+    if (style === '星光粒子') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      const colors = ['#fff','#facc15','#fde68a','#fff7ed'];
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<3;i++) {
+          const ang = Math.random()*Math.PI*2;
+          particles.push(new Particle(p.x, p.y, colors[Math.floor(Math.random()*colors.length)], 'star', {angle:ang, speed:0.5+Math.random()*1.5}));
+        }
+      });
+    }
+
+    /* --- 粒子消散：手部化尘飘散 --- */
+    if (style === '粒子消散') {
+      // 从所有21个关节点发射消散粒子
+      const cols = [currentColor, '#ffffff', currentColor];
+      pts.forEach(p => {
+        if (Math.random() < 0.4) {
+          const ang = Math.random()*Math.PI*2;
+          particles.push(new Particle(p.x, p.y, cols[Math.floor(Math.random()*cols.length)], 'dissolve', {angle:ang, speed:1+Math.random()*2}));
+        }
+      });
+    }
+
+    /* --- 光纤粒子：指尖发射光丝 --- */
+    if (style === '光纤粒子') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      dctx.lineCap = 'round';
+      tipsArr.forEach((tip, i) => {
+        // 从指尖到掌心的光纤线
+        dctx.strokeStyle = currentColor;
+        dctx.lineWidth = 1.5;
+        dctx.globalAlpha = 0.6;
+        dctx.shadowBlur = 12; dctx.shadowColor = currentColor;
+        dctx.beginPath();
+        dctx.moveTo(tip.x, tip.y);
+        dctx.lineTo(palm.x, palm.y);
+        dctx.stroke();
+        // 沿光纤流动的光点
+        const t = (globalTime*2 + i*0.3) % 1;
+        const lx = tip.x + (palm.x - tip.x) * t;
+        const ly = tip.y + (palm.y - tip.y) * t;
+        dctx.fillStyle = '#fff';
+        dctx.globalAlpha = 1;
+        dctx.shadowBlur = 20;
+        dctx.beginPath(); dctx.arc(lx, ly, 4, 0, Math.PI*2); dctx.fill();
+        // 指尖发射粒子
+        for (let k=0;k<2;k++) {
+          const ang = Math.atan2(tip.y-palm.y, tip.x-palm.x) + (Math.random()-0.5)*0.5;
+          particles.push(new Particle(tip.x, tip.y, currentColor, 'galaxy', {angle:ang, speed:2+Math.random()*3}));
+        }
+      });
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 萤火虫：手部周围流光 --- */
+    if (style === '萤火虫') {
+      const palm = pts[9];
+      const colors = ['#facc15','#fde68a','#a3e635','#fff'];
+      for (let i=0;i<6;i++) {
+        const ang = Math.random()*Math.PI*2;
+        const dist = 30+Math.random()*80;
+        const sx = palm.x + Math.cos(ang)*dist;
+        const sy = palm.y + Math.sin(ang)*dist;
+        particles.push(new Particle(sx, sy, colors[Math.floor(Math.random()*colors.length)], 'firefly', {angle:Math.random()*Math.PI*2, speed:0.3+Math.random()*0.8}));
+      }
+      // 掌心微光
+      dctx.fillStyle = '#facc15';
+      dctx.globalAlpha = 0.3;
+      dctx.shadowBlur = 40; dctx.shadowColor = '#facc15';
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 15, 0, Math.PI*2); dctx.fill();
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 螺旋光纤：掌心盘旋光丝 --- */
+    if (style === '螺旋光纤') {
+      const palm = pts[9];
+      // 螺旋粒子环绕掌心
+      for (let i=0;i<10;i++) {
+        const ang = Math.random()*Math.PI*2;
+        const dist = 30+Math.random()*60;
+        const sx = palm.x + Math.cos(ang)*dist;
+        const sy = palm.y + Math.sin(ang)*dist;
+        particles.push(new Particle(sx, sy, currentColor, 'spiral', {angle:ang, speed:1+Math.random()*2, cx:palm.x, cy:palm.y}));
+      }
+      // 掌心核心
+      dctx.fillStyle = '#fff';
+      dctx.shadowBlur = 25; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 6, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 霓虹粒子流：蓝色霓虹光流 --- */
+    if (style === '霓虹粒子流') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      const neonColors = ['#22d3ee','#3b82f6','#60a5fa','#06b6d4','#ffffff'];
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<4;i++) {
+          const ang = -Math.PI/2 + (Math.random()-0.5)*0.8;
+          particles.push(new Particle(p.x, p.y, neonColors[Math.floor(Math.random()*neonColors.length)], 'neon', {angle:ang, speed:2+Math.random()*4}));
+        }
+      });
+      // 掌心霓虹光
+      dctx.fillStyle = '#22d3ee';
+      dctx.shadowBlur = 30; dctx.shadowColor = '#22d3ee';
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 7, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 金粉闪光：金色金沙闪烁 --- */
+    if (style === '金粉闪光') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      const goldColors = ['#facc15','#fde68a','#fbbf24','#fff'];
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<5;i++) {
+          const ang = Math.random()*Math.PI*2;
+          particles.push(new Particle(p.x, p.y, goldColors[Math.floor(Math.random()*goldColors.length)], 'gold', {angle:ang, speed:1+Math.random()*2.5}));
+        }
+      });
+      // 掌心金色光辉
+      const grad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 40);
+      grad.addColorStop(0, 'rgba(250,204,21,0.6)');
+      grad.addColorStop(1, 'rgba(250,204,21,0)');
+      dctx.fillStyle = grad;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 40, 0, Math.PI*2); dctx.fill();
+    }
+
+    /* --- 数字矩阵：代码雨从手部下落 --- */
+    if (style === '数字矩阵') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      const greenColors = ['#4ade80','#22c55e','#86efac','#bbf7d0','#fff'];
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<4;i++) {
+          const ang = Math.PI/2 + (Math.random()-0.5)*0.4;
+          particles.push(new Particle(p.x, p.y, greenColors[Math.floor(Math.random()*greenColors.length)], 'matrix', {angle:ang, speed:1+Math.random()*3}));
+        }
+      });
+    }
+
+    /* --- 粒子光柱：掌心向上光束 --- */
+    if (style === '粒子光柱') {
+      const palm = pts[9];
+      // 向上发射粒子形成光柱
+      for (let i=0;i<15;i++) {
+        const ang = -Math.PI/2 + (Math.random()-0.5)*0.3;
+        particles.push(new Particle(palm.x + (Math.random()-0.5)*20, palm.y, currentColor, 'neon', {angle:ang, speed:3+Math.random()*5}));
+      }
+      // 光柱本体
+      const grad = dctx.createLinearGradient(palm.x, palm.y, palm.x, palm.y - 200);
+      grad.addColorStop(0, currentColor+'cc');
+      grad.addColorStop(1, currentColor+'00');
+      dctx.fillStyle = grad;
+      dctx.shadowBlur = 30; dctx.shadowColor = currentColor;
+      dctx.beginPath();
+      dctx.moveTo(palm.x-12, palm.y);
+      dctx.lineTo(palm.x+12, palm.y);
+      dctx.lineTo(palm.x+4, palm.y-220);
+      dctx.lineTo(palm.x-4, palm.y-220);
+      dctx.closePath();
+      dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子波浪：正弦波纹 --- */
+    if (style === '粒子波浪') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<4;i++) {
+          const ang = (Math.random()-0.5)*Math.PI;
+          particles.push(new Particle(p.x, p.y, currentColor, 'wave', {angle:ang, speed:1.5+Math.random()*2}));
+        }
+      });
+      // 波浪线
+      dctx.strokeStyle = currentColor;
+      dctx.lineWidth = 2;
+      dctx.globalAlpha = 0.5;
+      dctx.shadowBlur = 10; dctx.shadowColor = currentColor;
+      dctx.beginPath();
+      for (let x = palm.x-100; x <= palm.x+100; x += 4) {
+        const y = palm.y + Math.sin(x*0.05 + globalTime*3) * 15;
+        if (x === palm.x-100) dctx.moveTo(x, y); else dctx.lineTo(x, y);
+      }
+      dctx.stroke();
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 数据流：01字符流动 --- */
+    if (style === '数据流') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      const blueColors = ['#22d3ee','#3b82f6','#60a5fa','#06b6d4','#fff'];
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<4;i++) {
+          const ang = Math.random()*Math.PI*2;
+          particles.push(new Particle(p.x, p.y, blueColors[Math.floor(Math.random()*blueColors.length)], 'data', {angle:ang, speed:1+Math.random()*2}));
+        }
+      });
+      // 掌心数据核心
+      dctx.fillStyle = '#22d3ee';
+      dctx.shadowBlur = 20; dctx.shadowColor = '#22d3ee';
+      dctx.font = 'bold 16px monospace';
+      dctx.textAlign = 'center'; dctx.textBaseline = 'middle';
+      dctx.fillText(Math.random()<0.5?'0':'1', palm.x, palm.y);
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子拖尾：指尖彗尾 --- */
+    if (style === '粒子拖尾') {
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      tipsArr.forEach(p => {
+        for (let i=0;i<6;i++) {
+          const ang = Math.random()*Math.PI*2;
+          particles.push(new Particle(p.x, p.y, currentColor, 'trail', {angle:ang, speed:1+Math.random()*2}));
+        }
+        // 指尖亮点
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 20; dctx.shadowColor = currentColor;
+        dctx.beginPath(); dctx.arc(p.x, p.y, 5, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子线条：关节网络连线 --- */
+    if (style === '粒子线条') {
+      dctx.strokeStyle = currentColor;
+      dctx.lineWidth = 1.5;
+      dctx.globalAlpha = 0.7;
+      dctx.shadowBlur = 8; dctx.shadowColor = currentColor;
+      // 连接所有相邻关节
+      const cons = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+      cons.forEach(([a,b]) => {
+        dctx.beginPath();
+        dctx.moveTo(pts[a].x, pts[a].y);
+        dctx.lineTo(pts[b].x, pts[b].y);
+        dctx.stroke();
+      });
+      // 节点
+      pts.forEach(p => {
+        dctx.fillStyle = '#fff';
+        dctx.beginPath(); dctx.arc(p.x, p.y, 2.5, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子曲线：掌心弧线流光 --- */
+    if (style === '粒子曲线') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      dctx.strokeStyle = currentColor;
+      dctx.lineWidth = 2;
+      dctx.shadowBlur = 12; dctx.shadowColor = currentColor;
+      // 从每个指尖画贝塞尔曲线到掌心
+      tipsArr.forEach(tip => {
+        const mx = (tip.x + palm.x)/2 + (Math.random()-0.5)*40;
+        const my = (tip.y + palm.y)/2 + (Math.random()-0.5)*40;
+        dctx.globalAlpha = 0.4 + Math.sin(globalTime*3)*0.3;
+        dctx.beginPath();
+        dctx.moveTo(tip.x, tip.y);
+        dctx.quadraticCurveTo(mx, my, palm.x, palm.y);
+        dctx.stroke();
+        // 沿曲线流动粒子
+        for (let i=0;i<2;i++) {
+          particles.push(new Particle(tip.x, tip.y, currentColor, 'galaxy', {angle:Math.atan2(palm.y-tip.y, palm.x-tip.x), speed:2+Math.random()*2}));
+        }
+      });
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子上升：气泡向上飘 --- */
+    if (style === '粒子上升') {
+      const palm = pts[9];
+      const tipsArr = [4, 8, 12, 16, 20].map(i => pts[i]);
+      [palm, ...tipsArr].forEach(p => {
+        for (let i=0;i<4;i++) {
+          const ang = -Math.PI/2 + (Math.random()-0.5)*0.8;
+          particles.push(new Particle(p.x, p.y, currentColor, 'bubble', {angle:ang, speed:0.5+Math.random()*1.5}));
+        }
+      });
+      // 掌心气泡核心
+      dctx.fillStyle = currentColor;
+      dctx.globalAlpha = 0.4;
+      dctx.shadowBlur = 25; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 12, 0, Math.PI*2); dctx.fill();
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 粒子网格：手部周围点阵 --- */
+    if (style === '粒子网格') {
+      const palm = pts[9];
+      const spacing = 30;
+      const cols = 7, rows = 5;
+      dctx.fillStyle = currentColor;
+      dctx.shadowBlur = 10; dctx.shadowColor = currentColor;
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const gx = palm.x + (c - (cols-1)/2) * spacing;
+          const gy = palm.y + (r - (rows-1)/2) * spacing;
+          const dist = Math.hypot(gx-palm.x, gy-palm.y);
+          const pulse = 0.3 + 0.7 * Math.sin(globalTime*4 + dist*0.05);
+          dctx.globalAlpha = pulse * 0.8;
+          dctx.beginPath(); dctx.arc(gx, gy, 2.5, 0, Math.PI*2); dctx.fill();
+        }
+      }
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 星光拖尾：金色流体跟随手掌，重力+惯性扩散 --- */
+    if (style === '星光拖尾') {
+      const goldColors = ['#facc15','#fde68a','#fbbf24','#fef3c7','#fff'];
+      const sp = vel.speed;
+      // 快速挥动时：惯性扩散，粒子沿运动方向喷射
+      const inertiaX = vel.vx * 0.5;
+      const inertiaY = vel.vy * 0.5;
+      const spread = Math.min(sp * 0.3, 1.2);
+      // 掌心 + 指尖发射金色粒子
+      [palm, ...tipsArr].forEach((p, pi) => {
+        const count = 3 + Math.floor(sp * 0.5);
+        for (let i=0;i<count;i++) {
+          const ang = Math.random()*Math.PI*2;
+          const speed = 0.5 + Math.random()*2 + spread;
+          const p2 = new Particle(p.x, p.y, goldColors[Math.floor(Math.random()*goldColors.length)], 'trail', {
+            angle: ang, speed: speed
+          });
+          // 继承手部速度 → 惯性
+          p2.vx += inertiaX;
+          p2.vy += inertiaY;
+          particles.push(p2);
+        }
+      });
+      // 掌心金色核心光晕（Bloom 感）
+      const coreGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 30);
+      coreGrad.addColorStop(0, 'rgba(255,255,255,0.9)');
+      coreGrad.addColorStop(0.3, 'rgba(250,204,21,0.7)');
+      coreGrad.addColorStop(1, 'rgba(250,204,21,0)');
+      dctx.fillStyle = coreGrad;
+      dctx.shadowBlur = 30; dctx.shadowColor = '#facc15';
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 30, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 能量爆发：握拳径向发射红色粒子，张开则消散平静 --- */
+    if (style === '能量爆发') {
+      // 检测握拳/张开状态
+      const palm2 = pts[9];
+      const ext = [4,8,12,16,20].map((tip, fi) => {
+        const pip = [3,6,10,14,18][fi];
+        return Math.hypot(pts[tip].x-palm2.x, pts[tip].y-palm2.y) > Math.hypot(pts[pip].x-palm2.x, pts[pip].y-palm2.y) * 1.15;
+      });
+      const extCount = ext.filter(Boolean).length;
+      const isFist = extCount <= 1;
+      const redColors = ['#ff3b3b','#ff6b6b','#ff8a3d','#ffd700','#fff'];
+      if (isFist) {
+        // 握拳：径向爆发红色高能粒子
+        for (let i=0;i<12;i++) {
+          const ang = Math.random()*Math.PI*2;
+          const speed = 3 + Math.random()*6;
+          particles.push(new Particle(palm.x, palm.y, redColors[Math.floor(Math.random()*redColors.length)], 'burst', {angle:ang, speed:speed}));
+        }
+        // 拳头核心：强烈红白光晕（Bloom 冲击感）
+        const burstGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 35);
+        burstGrad.addColorStop(0, 'rgba(255,255,255,1)');
+        burstGrad.addColorStop(0.25, 'rgba(255,90,90,0.9)');
+        burstGrad.addColorStop(0.6, 'rgba(255,59,59,0.5)');
+        burstGrad.addColorStop(1, 'rgba(255,59,59,0)');
+        dctx.fillStyle = burstGrad;
+        dctx.shadowBlur = 40; dctx.shadowColor = '#ff3b3b';
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, 35, 0, Math.PI*2); dctx.fill();
+        // 冲击波环
+        const ringPhase = (globalTime * 2) % 1;
+        dctx.strokeStyle = `rgba(255,100,100,${(1-ringPhase)*0.8})`;
+        dctx.lineWidth = 3 * (1-ringPhase) + 1;
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, 15 + ringPhase*60, 0, Math.PI*2); dctx.stroke();
+        dctx.shadowBlur = 0;
+      } else {
+        // 张开：粒子逐渐消散，回归平静——不发射新粒子，已有粒子自然衰减
+        // 掌心微弱白色光晕
+        dctx.fillStyle = 'rgba(255,255,255,0.15)';
+        dctx.shadowBlur = 15; dctx.shadowColor = '#ff8a8a';
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, 10, 0, Math.PI*2); dctx.fill();
+        dctx.shadowBlur = 0;
+      }
+    }
+
+    /* --- 时空扭曲：捏合汇聚黑洞 / 拉开爆炸，Perlin 噪声 --- */
+    if (style === '时空扭曲') {
+      const thumb = pts[4], index = pts[8];
+      const pinchDist = Math.hypot(thumb.x-index.x, thumb.y-index.y);
+      const pinchMidX = (thumb.x+index.x)/2, pinchMidY = (thumb.y+index.y)/2;
+      // 捏合阈值：< 50 为汇聚，> 90 为爆炸
+      const isConverge = pinchDist < 50;
+      const isExplode = pinchDist > 90;
+      const blueColors = ['#3b82f6','#60a5fa','#22d3ee','#a78bfa','#fff'];
+      // 从捏合点周围发射蓝色粒子
+      for (let i=0;i<8;i++) {
+        const ang = Math.random()*Math.PI*2;
+        const dist = 30 + Math.random()*80;
+        const sx = pinchMidX + Math.cos(ang)*dist;
+        const sy = pinchMidY + Math.sin(ang)*dist;
+        const p = new Particle(sx, sy, blueColors[Math.floor(Math.random()*blueColors.length)], 'warp', {
+          angle: ang, speed: 1+Math.random()*2, cx: pinchMidX, cy: pinchMidY
+        });
+        p.warpMode = isConverge ? 'converge' : (isExplode ? 'explode' : 'converge');
+        particles.push(p);
+      }
+      // 黑洞核心 / 爆炸中心
+      if (isConverge) {
+        // 黑洞视界：暗色核心 + 蓝色吸积盘
+        const holeGrad = dctx.createRadialGradient(pinchMidX, pinchMidY, 0, pinchMidX, pinchMidY, 30);
+        holeGrad.addColorStop(0, '#000');
+        holeGrad.addColorStop(0.5, 'rgba(59,130,246,0.6)');
+        holeGrad.addColorStop(1, 'rgba(59,130,246,0)');
+        dctx.fillStyle = holeGrad;
+        dctx.shadowBlur = 25; dctx.shadowColor = '#3b82f6';
+        dctx.beginPath(); dctx.arc(pinchMidX, pinchMidY, 30, 0, Math.PI*2); dctx.fill();
+        // 旋转吸积环
+        dctx.strokeStyle = '#60a5fa';
+        dctx.lineWidth = 2;
+        dctx.globalAlpha = 0.7;
+        for (let r=1;r<=2;r++) {
+          const rot = globalTime * (r%2 ? 3 : -3);
+          dctx.beginPath(); dctx.arc(pinchMidX, pinchMidY, 12+r*8, rot, rot+Math.PI*1.4); dctx.stroke();
+        }
+        dctx.globalAlpha = 1;
+      } else if (isExplode) {
+        // 爆炸中心：白色闪光
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 35; dctx.shadowColor = '#22d3ee';
+        dctx.beginPath(); dctx.arc(pinchMidX, pinchMidY, 8+Math.sin(globalTime*8)*3, 0, Math.PI*2); dctx.fill();
+        // 爆炸冲击波
+        const expPhase = (globalTime * 3) % 1;
+        dctx.strokeStyle = `rgba(96,165,250,${(1-expPhase)*0.7})`;
+        dctx.lineWidth = 2;
+        dctx.beginPath(); dctx.arc(pinchMidX, pinchMidY, 10+expPhase*70, 0, Math.PI*2); dctx.stroke();
+      } else {
+        // 中间态：蓝色光点
+        dctx.fillStyle = '#60a5fa';
+        dctx.shadowBlur = 15;
+        dctx.beginPath(); dctx.arc(pinchMidX, pinchMidY, 5, 0, Math.PI*2); dctx.fill();
+      }
+      // 指尖连线（可视化捏合距离）
+      dctx.strokeStyle = 'rgba(96,165,250,0.5)';
+      dctx.lineWidth = 1.5;
+      dctx.setLineDash([4,4]);
+      dctx.beginPath(); dctx.moveTo(thumb.x, thumb.y); dctx.lineTo(index.x, index.y); dctx.stroke();
+      dctx.setLineDash([]);
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 呼吸森林：静止时绿色萤火盘旋上升，快速移动时吹散 --- */
+    if (style === '呼吸森林') {
+      const greenColors = ['#4ade80','#22c55e','#86efac','#bbf7d0','#a3e635','#fff'];
+      const isStill = vel.stillFrames > 8;
+      const sp = vel.speed;
+      if (isStill) {
+        // 静止：围绕指尖盘旋上升的萤火虫
+        tipsArr.forEach((tip, ti) => {
+          for (let i=0;i<3;i++) {
+            const ang = Math.random()*Math.PI*2;
+            const dist = 20 + Math.random()*50;
+            const sx = tip.x + Math.cos(ang)*dist;
+            const sy = tip.y + Math.sin(ang)*dist;
+            const p = new Particle(sx, sy, greenColors[Math.floor(Math.random()*greenColors.length)], 'forest', {
+              angle: ang, speed: 0.3+Math.random()*0.8, cx: tip.x, cy: tip.y
+            });
+            p.scatter = false;
+            particles.push(p);
+          }
+        });
+        // 指尖绿色柔光
+        dctx.fillStyle = 'rgba(74,222,128,0.2)';
+        dctx.shadowBlur = 25; dctx.shadowColor = '#4ade80';
+        tipsArr.forEach(tip => {
+          dctx.beginPath(); dctx.arc(tip.x, tip.y, 12, 0, Math.PI*2); dctx.fill();
+        });
+      } else {
+        // 快速移动：粒子被气流吹散，沿运动方向喷射
+        tipsArr.forEach((tip, ti) => {
+          for (let i=0;i<5;i++) {
+            const ang = Math.atan2(vel.vy, vel.vx) + (Math.random()-0.5)*1.5;
+            const speed = 1 + Math.random()*3 + sp*0.3;
+            const p = new Particle(tip.x, tip.y, greenColors[Math.floor(Math.random()*greenColors.length)], 'forest', {
+              angle: ang, speed: speed, cx: tip.x, cy: tip.y
+            });
+            p.scatter = true;
+            particles.push(p);
+          }
+        });
+      }
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 火焰披风：手部快速移动时沿轨迹喷射火焰 --- */
+    if (style === '火焰披风') {
+      const sp = vel.speed;
+      const fireColors = ['#ff3b3b','#ff8a3d','#facc15','#fff'];
+      // 速度越快，火焰越猛
+      if (sp > 2) {
+        const intensity = Math.min(sp / 15, 1);
+        const count = Math.floor(3 + intensity * 12);
+        [palm, ...tipsArr].forEach(p => {
+          for (let i=0;i<count;i++) {
+            const ang = Math.atan2(vel.vy, vel.vx) + (Math.random()-0.5)*1.2;
+            const speed = 1 + Math.random()*3 + intensity*3;
+            particles.push(new Particle(p.x, p.y, fireColors[Math.floor(Math.random()*fireColors.length)], 'fire', {
+              angle: ang, speed: speed
+            }));
+          }
+        });
+      }
+      // 掌心/指尖余烬（即使慢速也有微弱火星）
+      tipsArr.forEach(p => {
+        if (Math.random() < 0.3) {
+          particles.push(new Particle(p.x, p.y, '#facc15', 'fire', {
+            angle: Math.random()*Math.PI*2, speed: 0.5+Math.random()
+          }));
+        }
+      });
+      // 掌心核心火光
+      dctx.fillStyle = 'rgba(255,140,60,0.3)';
+      dctx.shadowBlur = 20; dctx.shadowColor = '#ff8a3d';
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 12, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 能量护盾：手掌张开度控制掌心护盾半径 --- */
+    if (style === '能量护盾') {
+      const tipsArr2 = [4, 8, 12, 16, 20];
+      let spread = 0;
+      tipsArr2.forEach(ti => { spread += Math.hypot(pts[ti].x-palm.x, pts[ti].y-palm.y); });
+      spread /= tipsArr2.length;
+      const openness = Math.min(spread / 100, 1);
+      const shieldR = 30 + openness * 80;
+      // 护盾主体：半透明能量球 + 旋转电弧
+      const shieldGrad = dctx.createRadialGradient(palm.x, palm.y, shieldR*0.3, palm.x, palm.y, shieldR);
+      shieldGrad.addColorStop(0, 'rgba(96,165,250,0)');
+      shieldGrad.addColorStop(0.7, `rgba(96,165,250,${0.1+openness*0.2})`);
+      shieldGrad.addColorStop(1, `rgba(96,165,250,${0.4+openness*0.4})`);
+      dctx.fillStyle = shieldGrad;
+      dctx.shadowBlur = 25; dctx.shadowColor = '#60a5fa';
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, shieldR, 0, Math.PI*2); dctx.fill();
+      // 护盾边缘旋转电弧
+      dctx.strokeStyle = '#93c5fd';
+      dctx.lineWidth = 2;
+      dctx.globalAlpha = 0.7 + openness*0.3;
+      for (let i=0;i<3;i++) {
+        const start = globalTime * (i%2?1.5:-1.5) + i*2;
+        dctx.beginPath();
+        dctx.arc(palm.x, palm.y, shieldR, start, start + Math.PI*0.8);
+        dctx.stroke();
+      }
+      // 护盾表面能量粒子
+      for (let i=0;i<6;i++) {
+        const a = globalTime*2 + i*Math.PI/3;
+        const px = palm.x + Math.cos(a)*shieldR;
+        const py = palm.y + Math.sin(a)*shieldR;
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 12;
+        dctx.beginPath(); dctx.arc(px, py, 2.5, 0, Math.PI*2); dctx.fill();
+      }
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 重力沙盒：手腕倾斜改变全局重力方向 --- */
+    if (style === '重力沙盒') {
+      const tilt = getWristTilt(pts);
+      // 将手腕 roll 角映射为重力方向（默认向下）
+      // roll=0 时手水平指向右，重力向下；倾斜手改变重力方向
+      const gx = Math.cos(tilt.roll - Math.PI/2) * 0.4;
+      const gy = Math.sin(tilt.roll - Math.PI/2) * 0.4;
+      // 平滑过渡重力方向
+      globalGravityDir.x = globalGravityDir.x * 0.85 + gx * 0.15;
+      globalGravityDir.y = globalGravityDir.y * 0.85 + gy * 0.15;
+      // 从指尖发射受重力影响的粒子
+      const gravColors = ['#22d3ee','#60a5fa','#a78bfa','#fff'];
+      tipsArr.forEach(p => {
+        for (let i=0;i<3;i++) {
+          const ang = Math.random()*Math.PI*2;
+          particles.push(new Particle(p.x, p.y, gravColors[Math.floor(Math.random()*gravColors.length)], 'gravity', {
+            angle: ang, speed: 1+Math.random()*2
+          }));
+        }
+      });
+      // 显示重力方向指示器（掌心小箭头）
+      const arrowLen = 30;
+      const ax = palm.x + globalGravityDir.x * 80;
+      const ay = palm.y + globalGravityDir.y * 80;
+      dctx.strokeStyle = '#22d3ee';
+      dctx.lineWidth = 3;
+      dctx.shadowBlur = 12; dctx.shadowColor = '#22d3ee';
+      dctx.beginPath(); dctx.moveTo(palm.x, palm.y); dctx.lineTo(ax, ay); dctx.stroke();
+      // 箭头头部
+      const ang2 = Math.atan2(globalGravityDir.y, globalGravityDir.x);
+      dctx.beginPath();
+      dctx.moveTo(ax, ay);
+      dctx.lineTo(ax - Math.cos(ang2-0.4)*10, ay - Math.sin(ang2-0.4)*10);
+      dctx.moveTo(ax, ay);
+      dctx.lineTo(ax - Math.cos(ang2+0.4)*10, ay - Math.sin(ang2+0.4)*10);
+      dctx.stroke();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 蓄力爆发：握拳充能 → 张开释放 --- */
+    if (style === '蓄力爆发') {
+      // 检测握拳状态
+      const palm2 = pts[9];
+      const ext = [4,8,12,16,20].map((tip, fi) => {
+        const pip = [3,6,10,14,18][fi];
+        return Math.hypot(pts[tip].x-palm2.x, pts[tip].y-palm2.y) > Math.hypot(pts[pip].x-palm2.x, pts[pip].y-palm2.y) * 1.15;
+      });
+      const isFist = ext.filter(Boolean).length <= 1;
+      const charge = updateChargeState(isFist, palm);
+      if (charge.released && charge.power > 0.15) {
+        // 爆发！根据蓄力强度发射粒子
+        const count = Math.floor(charge.power * 40);
+        const burstColors = ['#ff3b3b','#ff8a3d','#facc15','#fff','#60a5fa'];
+        const cx = charge.palm.x, cy = charge.palm.y;
+        for (let i=0;i<count;i++) {
+          const ang = Math.random()*Math.PI*2;
+          const speed = 3 + Math.random()*6 * charge.power;
+          particles.push(new Particle(cx, cy, burstColors[Math.floor(Math.random()*burstColors.length)], 'burst', {angle:ang, speed:speed}));
+        }
+        // 爆发中心闪光
+        const flashR = 20 + charge.power * 50;
+        const flashGrad = dctx.createRadialGradient(cx, cy, 0, cx, cy, flashR);
+        flashGrad.addColorStop(0, 'rgba(255,255,255,1)');
+        flashGrad.addColorStop(0.3, `rgba(255,200,100,${charge.power})`);
+        flashGrad.addColorStop(1, 'rgba(255,100,100,0)');
+        dctx.fillStyle = flashGrad;
+        dctx.shadowBlur = 50; dctx.shadowColor = '#ff8a3d';
+        dctx.beginPath(); dctx.arc(cx, cy, flashR, 0, Math.PI*2); dctx.fill();
+        dctx.shadowBlur = 0;
+        // 触发过渡波纹
+        transitionRipples.push({ x: cx, y: cy, life: 1, color: '#ff8a3d' });
+      } else if (chargeState.charging) {
+        // 充能中：掌心能量汇聚
+        const c = chargeState.charge;
+        // 充能环（半径收缩表示充能进度）
+        dctx.strokeStyle = `rgba(255,${Math.floor(200-c*150)},50,${0.5+c*0.5})`;
+        dctx.lineWidth = 3;
+        dctx.shadowBlur = 20; dctx.shadowColor = '#ff8a3d';
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, 40 - c*20, 0, Math.PI*2); dctx.stroke();
+        // 充能核心
+        const coreGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 15+c*10);
+        coreGrad.addColorStop(0, '#fff');
+        coreGrad.addColorStop(0.5, `rgba(255,150,50,${c})`);
+        coreGrad.addColorStop(1, 'rgba(255,100,50,0)');
+        dctx.fillStyle = coreGrad;
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, 15+c*10, 0, Math.PI*2); dctx.fill();
+        // 充能粒子向掌心汇聚
+        for (let i=0;i<3;i++) {
+          const ang = Math.random()*Math.PI*2;
+          const dist = 60 + Math.random()*40;
+          const p = new Particle(palm.x+Math.cos(ang)*dist, palm.y+Math.sin(ang)*dist, '#ff8a3d', 'warp', {cx:palm.x, cy:palm.y});
+          p.warpMode = 'converge';
+          particles.push(p);
+        }
+        dctx.shadowBlur = 0;
+      } else {
+        // 未蓄力状态：掌心微弱光晕
+        dctx.fillStyle = 'rgba(255,200,150,0.2)';
+        dctx.shadowBlur = 10; dctx.shadowColor = '#ff8a3d';
+        dctx.beginPath(); dctx.arc(palm.x, palm.y, 8, 0, Math.PI*2); dctx.fill();
+        dctx.shadowBlur = 0;
+      }
+    }
+
+    /* --- 闪电链：指尖之间动态电弧 --- */
+    if (style === '闪电链') {
+      const ltips = tips.map(ti => pts[ti]);
+      // 相邻指尖间画锯齿电弧
+      dctx.lineCap = 'round';
+      for (let i=0;i<ltips.length-1;i++) {
+        const a = ltips[i], b = ltips[i+1];
+        const segs = 8;
+        dctx.strokeStyle = '#fff';
+        dctx.lineWidth = 2.5;
+        dctx.shadowBlur = 15; dctx.shadowColor = currentColor;
+        dctx.globalAlpha = 0.9;
+        dctx.beginPath();
+        dctx.moveTo(a.x, a.y);
+        for (let s=1;s<segs;s++) {
+          const t = s/segs;
+          const mx = a.x + (b.x-a.x)*t + (Math.random()-0.5)*18;
+          const my = a.y + (b.y-a.y)*t + (Math.random()-0.5)*18;
+          dctx.lineTo(mx, my);
+        }
+        dctx.lineTo(b.x, b.y);
+        dctx.stroke();
+        // 彩色外电弧
+        dctx.strokeStyle = currentColor;
+        dctx.lineWidth = 1;
+        dctx.globalAlpha = 0.6;
+        dctx.stroke();
+      }
+      // 指尖电火花
+      ltips.forEach(p => {
+        for (let i=0;i<2;i++) {
+          particles.push(new Particle(p.x, p.y, currentColor, 'spark', {
+            angle: Math.random()*Math.PI*2, speed: 1+Math.random()*3
+          }));
+        }
+        // 指尖节点
+        dctx.globalAlpha = 1;
+        dctx.fillStyle = '#fff';
+        dctx.shadowBlur = 12;
+        dctx.beginPath(); dctx.arc(p.x, p.y, 4, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.globalAlpha = 1; dctx.shadowBlur = 0;
+    }
+
+    /* --- 冰棱结晶：掌心凝霜向外生长 --- */
+    if (style === '冰棱结晶') {
+      const iceColors = ['#a5f3fc','#67e8f9','#22d3ee','#0ea5e9','#fff'];
+      // 从指尖和掌心发射冰棱粒子
+      const emitPts = [palm, ...tipsArr];
+      emitPts.forEach(p => {
+        if (Math.random() < 0.6) {
+          const ang = Math.atan2(p.y-palm.y, p.x-palm.x) + (Math.random()-0.5)*0.8;
+          particles.push(new Particle(p.x, p.y, iceColors[Math.floor(Math.random()*iceColors.length)], 'ice', {
+            angle: ang, speed: 0.5+Math.random()*1.5
+          }));
+        }
+      });
+      // 掌心冰晶核心
+      const coreGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 25);
+      coreGrad.addColorStop(0, 'rgba(255,255,255,0.8)');
+      coreGrad.addColorStop(0.5, 'rgba(165,243,252,0.4)');
+      coreGrad.addColorStop(1, 'rgba(34,211,238,0)');
+      dctx.fillStyle = coreGrad;
+      dctx.shadowBlur = 20; dctx.shadowColor = '#22d3ee';
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 25, 0, Math.PI*2); dctx.fill();
+      // 掌心六角星芒
+      dctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      dctx.lineWidth = 1.5;
+      for (let i=0;i<3;i++) {
+        const ang = globalTime*0.5 + i*Math.PI/3;
+        dctx.beginPath();
+        dctx.moveTo(palm.x - Math.cos(ang)*18, palm.y - Math.sin(ang)*18);
+        dctx.lineTo(palm.x + Math.cos(ang)*18, palm.y + Math.sin(ang)*18);
+        dctx.stroke();
+      }
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 藤蔓生长：指尖生出藤蔓和叶子 --- */
+    if (style === '藤蔓生长') {
+      const vineColors = ['#4ade80','#22c55e','#86efac','#bbf7d0','#facc15'];
+      tipsArr.forEach(p => {
+        if (Math.random() < 0.5) {
+          const ang = Math.atan2(p.y-palm.y, p.x-palm.x) + (Math.random()-0.5)*1.0;
+          particles.push(new Particle(p.x, p.y, vineColors[Math.floor(Math.random()*vineColors.length)], 'vine', {
+            angle: ang, speed: 0.8+Math.random()*1.5
+          }));
+        }
+      });
+      // 指尖发芽点
+      tipsArr.forEach(p => {
+        dctx.fillStyle = '#4ade80';
+        dctx.shadowBlur = 10; dctx.shadowColor = '#4ade80';
+        dctx.beginPath(); dctx.arc(p.x, p.y, 4, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 泡泡梦境：掌心漂浮彩色气泡 --- */
+    if (style === '泡泡梦境') {
+      const bubbleColors = ['#f472b6','#c084fc','#60a5fa','#22d3ee','#4ade80','#facc15'];
+      // 从掌心发射气泡
+      if (Math.random() < 0.7) {
+        const col = bubbleColors[Math.floor(Math.random()*bubbleColors.length)];
+        const b = new Particle(palm.x, palm.y, col, 'bubble', {
+          angle: -Math.PI/2 + (Math.random()-0.5)*1.2,
+          speed: 0.5+Math.random()*1.5
+        });
+        b.bubbleR = 8 + Math.random()*16;
+        b.bubbleHue = Math.random()*360;
+        particles.push(b);
+      }
+      // 指尖也发射小气泡
+      tipsArr.forEach(p => {
+        if (Math.random() < 0.2) {
+          const col = bubbleColors[Math.floor(Math.random()*bubbleColors.length)];
+          const b = new Particle(p.x, p.y, col, 'bubble', {
+            angle: -Math.PI/2 + (Math.random()-0.5)*0.8,
+            speed: 0.3+Math.random()
+          });
+          b.bubbleR = 4 + Math.random()*8;
+          particles.push(b);
+        }
+      });
+      // 掌心气泡核心
+      dctx.fillStyle = 'rgba(255,255,255,0.15)';
+      dctx.shadowBlur = 20; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 20, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 声波涟漪：掌心发出同心声波环 --- */
+    if (style === '声波涟漪') {
+      // 周期性发射涟漪
+      if (Math.sin(globalTime*3) > 0.9) {
+        particles.push(new Particle(palm.x, palm.y, currentColor, 'ripple', {
+          angle: 0, speed: 0
+        }));
+      }
+      // 掌心音波核心
+      const pulse = 0.7 + 0.3*Math.sin(globalTime*6);
+      const coreGrad = dctx.createRadialGradient(palm.x, palm.y, 0, palm.x, palm.y, 30*pulse);
+      coreGrad.addColorStop(0, `rgba(255,255,255,${0.6*pulse})`);
+      coreGrad.addColorStop(0.5, `${currentColor}66`);
+      coreGrad.addColorStop(1, 'rgba(0,0,0,0)');
+      dctx.fillStyle = coreGrad;
+      dctx.shadowBlur = 20; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 30*pulse, 0, Math.PI*2); dctx.fill();
+      // 指尖节点
+      tipsArr.forEach(p => {
+        dctx.fillStyle = currentColor;
+        dctx.shadowBlur = 8;
+        dctx.beginPath(); dctx.arc(p.x, p.y, 3, 0, Math.PI*2); dctx.fill();
+      });
+      dctx.shadowBlur = 0;
+    }
+
+    /* --- 烟花绽放：挥手触发烟花爆炸 --- */
+    if (style === '烟花绽放') {
+      const fwColors = ['#ff3b3b','#ff8a3d','#facc15','#4ade80','#22d3ee','#60a5fa','#c084fc','#f472b6','#fff'];
+      const sp = vel.speed;
+      // 快速移动时在轨迹上绽放烟花
+      if (sp > 3) {
+        const burstCount = Math.min(Math.floor(sp/2), 5);
+        for (let b=0;b<burstCount;b++) {
+          const cx = palm.x + (Math.random()-0.5)*40;
+          const cy = palm.y + (Math.random()-0.5)*40;
+          const pCol = fwColors[Math.floor(Math.random()*fwColors.length)];
+          const n = 12 + Math.floor(Math.random()*8);
+          for (let i=0;i<n;i++) {
+            const ang = (i/n)*Math.PI*2 + Math.random()*0.3;
+            const sp2 = 2+Math.random()*4;
+            particles.push(new Particle(cx, cy, pCol, 'firework', {angle:ang, speed:sp2}));
+          }
+          // 爆炸中心闪光
+          transitionRipples.push({ x: cx, y: cy, life: 1, color: pCol });
+        }
+      } else {
+        // 慢速时掌心零星火星
+        if (Math.random() < 0.3) {
+          particles.push(new Particle(palm.x, palm.y, fwColors[Math.floor(Math.random()*fwColors.length)], 'firework', {
+            angle: Math.random()*Math.PI*2, speed: 0.5+Math.random()
+          }));
+        }
+      }
+      // 掌心引导光点
+      dctx.fillStyle = 'rgba(255,255,255,0.6)';
+      dctx.shadowBlur = 15; dctx.shadowColor = currentColor;
+      dctx.beginPath(); dctx.arc(palm.x, palm.y, 6, 0, Math.PI*2); dctx.fill();
+      dctx.shadowBlur = 0;
+    }
+  });
+
+  /* --- 弹力绳：双手间弹性光带（双手风格） --- */
+  if (style === '弹力绳' && allPts.length >= 2) {
+    const h1 = allPts[0], h2 = allPts[1];
+    const p1 = h1[9], p2 = h2[9];
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const dist = Math.hypot(dx, dy);
+    // 弹性带：距离越远越细越亮，带波形抖动
+    const segs = 20;
+    dctx.lineCap = 'round';
+    // 外层发光宽带
+    dctx.strokeStyle = currentColor;
+    dctx.lineWidth = 12;
+    dctx.globalAlpha = 0.2;
+    dctx.shadowBlur = 25; dctx.shadowColor = currentColor;
+    dctx.beginPath();
+    for (let i=0;i<=segs;i++) {
+      const t = i/segs;
+      const x = p1.x + dx*t;
+      const y = p1.y + dy*t + Math.sin(t*Math.PI*4 + globalTime*5) * 6 * Math.min(dist/300,1);
+      i===0 ? dctx.moveTo(x,y) : dctx.lineTo(x,y);
+    }
+    dctx.stroke();
+    // 内层亮线
+    dctx.strokeStyle = '#fff';
+    dctx.lineWidth = 3;
+    dctx.globalAlpha = 0.9;
+    dctx.shadowBlur = 10;
+    dctx.beginPath();
+    for (let i=0;i<=segs;i++) {
+      const t = i/segs;
+      const x = p1.x + dx*t;
+      const y = p1.y + dy*t + Math.sin(t*Math.PI*4 + globalTime*5) * 6 * Math.min(dist/300,1);
+      i===0 ? dctx.moveTo(x,y) : dctx.lineTo(x,y);
+    }
+    dctx.stroke();
+    // 沿弹性带流动的能量粒子
+    if (Math.random() < 0.5) {
+      const t = Math.random();
+      const x = p1.x + dx*t;
+      const y = p1.y + dy*t;
+      flowParticles.push({ ax:p1.x, ay:p1.y, bx:p2.x, by:p2.y, t:t, speed:0.03, color:'#fff', size:3 });
+    }
+    // 两端连接点
+    dctx.globalAlpha = 1;
+    dctx.fillStyle = '#fff';
+    dctx.shadowBlur = 15;
+    dctx.beginPath(); dctx.arc(p1.x, p1.y, 6, 0, Math.PI*2); dctx.fill();
+    dctx.beginPath(); dctx.arc(p2.x, p2.y, 6, 0, Math.PI*2); dctx.fill();
+    dctx.shadowBlur = 0;
+  }
+
+  /* 绘制 + 更新粒子（加法混合，重叠更亮更炫） */
+  fctx.globalCompositeOperation = 'lighter';
+  const MAX_PARTICLES = 600;
+  while (particles.length > MAX_PARTICLES) particles.shift();
+  for (let i=particles.length-1;i>=0;i--) {
+    const p = particles[i];
+    p.step(dt); p.draw(fctx);
+    if (p.life <= 0) particles.splice(i,1);
+  }
+  // 星座网流动粒子
+  for (let i=flowParticles.length-1;i>=0;i--) {
+    const fp = flowParticles[i];
+    fp.t += fp.speed * dt;
+    if (fp.t >= 1) { flowParticles.splice(i,1); continue; }
+    const x = fp.ax + (fp.bx-fp.ax)*fp.t;
+    const y = fp.ay + (fp.by-fp.ay)*fp.t;
+    fctx.fillStyle = fp.color;
+    fctx.shadowBlur = 10; fctx.shadowColor = fp.color;
+    fctx.globalAlpha = Math.sin(fp.t*Math.PI);
+    fctx.beginPath(); fctx.arc(x, y, fp.size, 0, Math.PI*2); fctx.fill();
+  }
+  // 过渡能量波纹
+  for (let i=transitionRipples.length-1;i>=0;i--) {
+    const r = transitionRipples[i];
+    r.life -= 0.025 * dt;
+    if (r.life <= 0) { transitionRipples.splice(i,1); continue; }
+    const radius = (1 - r.life) * 120 + 10;
+    const alpha = r.life * 0.7;
+    dctx.strokeStyle = r.color;
+    dctx.lineWidth = 3 * r.life + 1;
+    dctx.shadowBlur = 20 * r.life; dctx.shadowColor = r.color;
+    dctx.globalAlpha = alpha;
+    dctx.beginPath(); dctx.arc(r.x, r.y, radius, 0, Math.PI*2); dctx.stroke();
+    dctx.globalAlpha = alpha * 0.15;
+    dctx.fillStyle = r.color;
+    dctx.beginPath(); dctx.arc(r.x, r.y, radius*0.7, 0, Math.PI*2); dctx.fill();
+  }
+  fctx.globalCompositeOperation = 'source-over';
+  fctx.shadowBlur = 0; fctx.globalAlpha = 1;
+  dctx.shadowBlur = 0; dctx.globalAlpha = 1;
+}
+
+/* 无手时仍需更新残留粒子（让其自然消散） */
+function updateAndDrawParticles(dt) {
+  fctx.globalCompositeOperation = 'lighter';
+  for (let i=particles.length-1;i>=0;i--) {
+    const p = particles[i];
+    p.step(dt); p.draw(fctx);
+    if (p.life <= 0) particles.splice(i,1);
+  }
+  for (let i=transitionRipples.length-1;i>=0;i--) {
+    const r = transitionRipples[i];
+    r.life -= 0.025 * dt;
+    if (r.life <= 0) { transitionRipples.splice(i,1); continue; }
+    const radius = (1 - r.life) * 120 + 10;
+    dctx.strokeStyle = r.color;
+    dctx.globalAlpha = r.life * 0.7;
+    dctx.beginPath(); dctx.arc(r.x, r.y, radius, 0, Math.PI*2); dctx.stroke();
+  }
+  fctx.globalCompositeOperation = 'source-over';
+  fctx.shadowBlur = 0; fctx.globalAlpha = 1;
+  dctx.shadowBlur = 0; dctx.globalAlpha = 1;
+}
+
+// 启动渲染循环
+requestAnimationFrame(render);
+
+/* ============================================================
+   UI 控制
+============================================================ */
+/* 色板 */
+const colorsEl = document.getElementById('colors');
+COLORS.forEach((c, i) => {
+  const d = document.createElement('div');
+  d.className = 'swatch' + (i===0?' active':'');
+  d.style.background = c; d.style.color = c;
+  d.onclick = () => {
+    currentColor = c;
+    document.querySelectorAll('.swatch').forEach(s=>s.classList.remove('active'));
+    d.classList.add('active');
+    // 更新氛围光晕颜色
+    const amb = document.getElementById('ambiance');
+    if (amb) amb.style.boxShadow = `inset 0 0 120px 20px ${c}33`;
+    log('🎨 颜色 → ' + c);
+  };
+  colorsEl.appendChild(d);
+});
+// 初始化氛围光晕
+document.getElementById('ambiance').style.boxShadow = `inset 0 0 120px 20px ${COLORS[0]}33`;
+
+/* 风格切换 */
+const styleNameEl = document.getElementById('styleName');
+// 过渡状态：风格切换时的能量波纹
+let transitionRipples = []; // {x,y,life,color}
+function setStyle(i, origin) {
+  currentStyleIdx = (i + STYLES.length) % STYLES.length;
+  const s = STYLES[currentStyleIdx];
+  styleNameEl.textContent = STYLE_LABELS[s];
+  // ── 无缝过渡核心：不清空粒子 ──
+  // 旧粒子保留并加速衰减（life 自然减少），新风格粒子逐帧生成，形成交叉淡入淡出
+  particles.forEach(p => {
+    // 将衰减提高到至少 0.06，让旧粒子在 ~0.5 秒内淡出，而非突兀消失
+    if (p.decay < 0.06) p.decay = 0.06;
+    // 标记为"过渡粒子"，不再参与新风格的持续生成逻辑
+    p.transitioning = true;
+  });
+  // 仅清空风格专属的临时轨迹（丝带/星座流动粒子不跨风格保留）
+  for (const k in ribbonTrails) delete ribbonTrails[k];
+  flowParticles.length = 0;
+  // 在触发点（掌心）生成过渡能量波纹
+  if (origin) {
+    transitionRipples.push({ x: origin.x, y: origin.y, life: 1, color: currentColor });
+  }
+  log('✨ 风格 → ' + STYLE_LABELS[s]);
+  if (s === '红白' || s === '金色' || s === '双手拼接') log('🤚 请伸出双手');
+}
+addEventListener('keydown', e => {
+  if (e.key === 'x' || e.key === 'X') setStyle(currentStyleIdx + 1);
+  if (e.key === 'g' || e.key === 'G') {
+    gestureMode = !gestureMode;
+    log(gestureMode ? '✋ 手势模式：开' : '✋ 手势模式：关（用X切换）');
+  }
+});
+
+/* FPS */
+let frames=0, lastT=performance.now();
+function fpsLoop(){
+  frames++;
+  const now=performance.now();
+  if (now-lastT>=500) {
+    document.getElementById('fps').textContent = Math.round(frames*1000/(now-lastT))+' fps';
+    frames=0; lastT=now;
+  }
+  requestAnimationFrame(fpsLoop);
+}
+fpsLoop();
+
+/* 控制台日志 */
+const consoleEl = document.getElementById('console');
+function log(msg) {
+  const t = new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  const line = document.createElement('div');
+  line.className='line';
+  line.innerHTML = `<span class="t">${t}</span> <span class="k">›</span> ${msg}`;
+  consoleEl.appendChild(line);
+  while (consoleEl.children.length > 6) consoleEl.removeChild(consoleEl.firstChild);
+}
+
+/* ============================================================
+   启动
+============================================================ */
+document.getElementById('startBtn').onclick = async () => {
+  try {
+    log('📷 启动摄像头...');
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    video.srcObject = stream;
+    // 等待视频元数据加载（带超时，避免永久卡住）
+    await Promise.race([
+      new Promise(r => video.onloadedmetadata = r),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('视频加载超时')), 5000))
+    ]);
+
+    const camera = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 1280, height: 720
+    });
+    await camera.start();
+
+    document.getElementById('status').classList.add('ready');
+    document.getElementById('statusText').textContent = '源画板已就位';
+    document.getElementById('startMask').style.display = 'none';
+    log('✋ 伸出你的手');
+    setStyle(0);
+  } catch (err) {
+    log('❌ 摄像头失败: ' + err.message);
+    alert('无法访问摄像头：' + err.message);
+  }
+};
+</script>
+
+
+
+</body></html>
